@@ -108,13 +108,30 @@ async function refreshStatus() {
 }
 
 /* ---------------------------------------------------------------- decision rendering */
-function showDecision(res, totalMs) {
+/** Decision time = retrieval + printing: from sending the request to the decision painted on
+ *  screen. The capture before it is shown separately and not counted; extra steps (recapture,
+ *  live cue, code) are timed as their own decisions. */
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+async function verifyAndShow(blob, fields) {
+  const tSent = performance.now();
+  const res = await postForm("/api/verify", framesForm([blob], fields));
+  const retrievalMs = performance.now() - tSent;
+  showDecision(res, { retrievalMs });
+  await nextPaint();
+  const decisionMs = performance.now() - tSent;
+  showDecision(res, { retrievalMs, decisionMs });  // same content, now with the measured time
+  postForm("/api/timing", framesForm([], { total_ms: decisionMs })).catch(() => {});
+  return res;
+}
+
+function showDecision(res, time = {}) {
   const st = STATE[res.decision] || { cls: "", word: "", note: "" };
   decisionEl.className = `decision ${st.cls}`;
   const t = res.timing_ms || {};
   const c = res.context;
   const rows = [];
-  if (totalMs) rows.push(["Decision time", `${(totalMs / 1000).toFixed(2)} s`]);
+  if (time.decisionMs) rows.push(["Decision time", `${(time.decisionMs / 1000).toFixed(2)} s`]);
   if (res.confidence !== undefined) rows.push(["Confidence", res.confidence.toFixed(2)]);
   if (res.identity?.name) rows.push(["Identity", esc(res.identity.name) + (c?.role ? ` · ${esc(c.role)}` : "")]);
   if (res.identity?.similarity !== undefined && res.identity?.user_id) rows.push(["Face match", res.identity.similarity.toFixed(2)]);
@@ -127,13 +144,16 @@ function showDecision(res, totalMs) {
   if (occ && (occ.sunglasses || occ.mask)) rows.push(["Accessories", [occ.sunglasses && "sunglasses", occ.mask && "face mask"].filter(Boolean).join(", ") + " detected"]);
   if (res.challenge) rows.push(["Live cue", `${CUE_LABEL[res.challenge.action] || res.challenge.action} · ${res.challenge.passed ? "passed" : "not detected"}`]);
   if (res.mode) rows.push(["Mode", res.mode === "offline" ? "Offline fail-safe" : "Online"]);
-  const network = Math.max(0, Math.round(totalMs - (res.capture_ms || 0) - (t.processing || 0)));
+  const server = Math.round(t.processing || 0);
+  const network = Math.max(0, Math.round((time.retrievalMs || 0) - server));
+  const display = Math.max(0, Math.round((time.decisionMs || 0) - (time.retrievalMs || 0)));
   decisionEl.innerHTML = `
     <div class="eyebrow">${esc(st.note)}</div>
     <div class="big">${st.word}</div>
     <p class="why">${(res.reasons || []).map(esc).join("<br>")}</p>
     ${rows.length ? `<dl class="readout">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
-    ${totalMs ? `<p class="breakdown">capture ${Math.round(res.capture_ms || 0)} ms · server ${Math.round(t.processing || 0)} ms · network ${network} ms</p>` : ""}`;
+    ${time.decisionMs ? `<p class="breakdown">server ${server} ms · network ${network} ms · display ${display} ms` +
+      ` <span class="muted">(capture ${Math.round(res.capture_ms || 0)} ms before it, not counted)</span></p>` : ""}`;
   setCamState(st.cls);
   if (staff) $("debug").innerHTML = renderDebug(res);
 }
@@ -189,14 +209,10 @@ async function runCheck() {
     const why = lastStatus?.mode === "offline" ? "Offline check" : "High-security check";
     const shot = cue ? await cueCapture(cue, why) : await burst(cfg.capture.frames, cfg.capture.duration_ms);
     banner.textContent = "Analysing";
-    const t0 = performance.now() - shot.captureMs;
-    const res = await postForm("/api/verify", framesForm([shot.lastBlob], {
+    const res = await verifyAndShow(shot.lastBlob, {
       claimed_id: $("claimed").value, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n,
-      challenge_id: cue ? cue.id : "", ...context() }));
-    const total = performance.now() - t0;
-    postForm("/api/timing", framesForm([], { total_ms: total })).catch(() => {});
+      challenge_id: cue ? cue.id : "", ...context() });
     lastOcclusion = res.occlusion || null;
-    showDecision(res, total);
     await handleNext(res);
   } catch (e) {
     idle(`Error: ${e.message}`);
@@ -217,10 +233,8 @@ async function handleNext(res) {
     const ch = res.challenge_request;
     const shot = await cueCapture(ch, "Extra check");
     banner.textContent = "Analysing";
-    const t0 = performance.now() - shot.captureMs;
-    const res2 = await postForm("/api/verify", framesForm([shot.lastBlob], {
-      challenge_id: ch.id, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() }));
-    showDecision(res2, performance.now() - t0);
+    const res2 = await verifyAndShow(shot.lastBlob, {
+      challenge_id: ch.id, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() });
     return handleNext(res2);
   }
   if (res.otp_request) {

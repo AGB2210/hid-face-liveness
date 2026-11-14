@@ -129,8 +129,8 @@
             <td${a.denied.rate > 0 ? ' style="color:var(--deny)"' : ""}>${p(a.denied, 0)}</td><td>${p(a.detected, 0)}</td><td>${p(a.bpcer, 0)}</td>
             <td class="muted small">${a.expected === "allow" ? "allow" : "guidance"}</td></tr>`).join("")}</table></section>`;
       }
-      html += `<section class="card"><h2>Decision time (capture + processing)</h2>${histogram(t)}
-        <p class="small muted">Processing only: median ${t.processing_p50} ms, 95th pct ${t.processing_p95} ms. Capture burst ≈ 1.0 s. Measured on a laptop CPU, no GPU.</p></section>`;
+      html += `<section class="card"><h2>Decision time (getting the decision, capture not counted)</h2>${histogram(t)}
+        <p class="small muted">Median ${t.processing_p50} ms, 95th pct ${t.processing_p95} ms. The ~1.0 s camera capture before it is not counted. On the live kiosk the decision time also includes the network and painting the result. Measured on a laptop CPU, no GPU.</p></section>`;
 
       html += `<section class="card"><h2>Which checks do the work (ablation)</h2>
         <p class="small muted">AUC = chance that a random live clip scores higher than a random attack clip (1.00 perfect, 0.50 useless). Coverage = share of clips where the check could give an answer.</p>

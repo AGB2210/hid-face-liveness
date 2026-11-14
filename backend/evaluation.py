@@ -133,7 +133,9 @@ def summarise(rows: list[dict]) -> dict:
     face_acc = rate((len(gen) - fr) + (len(imp) - fa), len(gen) + len(imp))
 
     # ---- decision time ------------------------------------------------------------
-    total = np.array([r["capture_ms"] + r["processing_ms"] for r in rows]) if rows else np.zeros(0)
+    # decision time = getting the decision, not the camera capture before it (replayed clips have
+    # no network, so that is the processing time)
+    total = np.array([r["processing_ms"] for r in rows]) if rows else np.zeros(0)
     proc = np.array([r["processing_ms"] for r in rows]) if rows else np.zeros(0)
 
     def pct(a, q):
@@ -143,8 +145,8 @@ def summarise(rows: list[dict]) -> dict:
               "total_max": round(float(total.max()), 1) if len(total) else None,
               "processing_p50": pct(proc, 50), "processing_p95": pct(proc, 95),
               "under_2s": rate(int((total < 2000).sum()), len(total)),
-              "histogram": np.histogram(total, bins=np.arange(800, 2200, 100))[0].tolist() if len(total) else [],
-              "bins_ms": list(range(800, 2200, 100))}
+              "histogram": np.histogram(total, bins=np.arange(0, 2200, 100))[0].tolist() if len(total) else [],
+              "bins_ms": list(range(0, 2200, 100))}
 
     # ---- live user experience --------------------------------------------------------
     live_outcomes = {d: sum(r["decision"] == d for r in live) for d in DECISIONS}

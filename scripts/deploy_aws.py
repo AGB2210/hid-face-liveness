@@ -124,7 +124,7 @@ After=network-online.target
 [Service]
 WorkingDirectory=/opt/hid
 EnvironmentFile=/etc/hid-kiosk.env
-ExecStart=/opt/hid/.venv/bin/python -m uvicorn app:app --app-dir backend --host 0.0.0.0 --port {PORT}
+ExecStart=/opt/hid/.venv/bin/python -m uvicorn app:app --app-dir backend --host 0.0.0.0 --port {PORT} --timeout-keep-alive 75
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -145,6 +145,12 @@ cd /opt/hid
 curl -fsSL '{url}' -o /tmp/code.tar.gz
 tar xzf /tmp/code.tar.gz -C /opt/hid
 .venv/bin/pip install -q -r requirements.txt
+# keep idle connections open longer than CloudFront's 5 s origin keep-alive, otherwise CloudFront
+# sometimes reuses a connection the app just closed and the request fails with a 502
+if ! grep -q -- '--timeout-keep-alive' /etc/systemd/system/hid-kiosk.service; then
+  sed -i 's|--port {port}$|--port {port} --timeout-keep-alive 75|' /etc/systemd/system/hid-kiosk.service
+  systemctl daemon-reload
+fi
 systemctl restart hid-kiosk
 # health check from inside the server, so it works whatever the deployer's IP is
 for i in $(seq 1 45); do

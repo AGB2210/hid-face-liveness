@@ -57,7 +57,9 @@ export async function captureStreamed(video, n, durationMs, quality = 0.92, onPr
         const fd = new FormData();
         fd.append("idx", i);
         fd.append("frame", b, `f${i}.jpg`);
-        return fetch(`/api/burst/${burstId}/frame`, { method: "POST", body: fd }).then((r) => r.ok).catch(() => false);
+        // one retry: a dropped frame would otherwise make the server wait for it
+        const send = () => fetch(`/api/burst/${burstId}/frame`, { method: "POST", body: fd }).then((r) => r.ok).catch(() => false);
+        return send().then((ok) => ok || send());
       }));
     } else {
       last = blob;
