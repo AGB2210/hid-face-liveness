@@ -95,7 +95,8 @@
         ${tile(p(h.attacks_allowed), "Attacks that got ALLOW", kn(h.attacks_allowed), cls(h.attacks_allowed.rate, 0, .05, false))}
       </div><p class="small muted">Small test set: 95% confidence intervals are shown so the numbers are not over-claimed.
       Thresholds: liveness allow ≥ ${r.thresholds.liveness_allow}, deny &lt; ${r.thresholds.liveness_deny}; identity match ≥ ${r.thresholds.identity_match}.
-      ${(r.eval_gallery || []).length ? `Test subjects ${esc(r.eval_gallery.join(", "))} aren't kiosk users, so each was enrolled (for this evaluation only, nothing saved) from their first live clip; that clip is left out of the identity and decision numbers.` : ""}</p></section>`;
+      ${(r.eval_gallery || []).length ? `Test subjects ${esc(r.eval_gallery.join(", "))} aren't kiosk users, so each was enrolled (for this evaluation only, nothing saved) from their first live clip; that clip is left out of the identity and decision numbers.` : ""}
+      ${Object.entries(r.same_person || {}).map(([s, m]) => `${esc(s)} is the same person as kiosk user ${Object.entries(m).map(([u, v]) => `${esc(u)} (match ${v.toFixed(2)})`).join(", ")}, so that match isn't counted as a false accept.`).join(" ")}</p></section>`;
 
       const sp = Object.entries(r.splits || {});
       if (sp.length) {

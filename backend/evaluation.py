@@ -115,7 +115,27 @@ def build_gallery(paths: list[Path]) -> tuple[dict[str, np.ndarray], set[Path]]:
     return gallery, used
 
 
-def run_clip(meta_path: Path, provider=None, enrollment: bool = False) -> dict:
+# A test subject whose face matches an enrolled kiosk user this strongly is that same person
+# (e.g. a tester who is also an admin). Well above the match threshold and every score between
+# different people seen in testing (<= 0.32), so a real impostor isn't hidden this way.
+SAME_PERSON = 0.60
+
+
+def same_people(gallery: dict[str, np.ndarray]) -> dict[str, dict[str, float]]:
+    """test subject -> {kiosk user id: similarity} for kiosk users who are the same person."""
+    import store
+    out = {}
+    for subject, embs in gallery.items():
+        probe = embs.mean(axis=0)
+        probe /= np.linalg.norm(probe) + 1e-9
+        hits = {uid: round(float(np.max(t @ probe)), 3) for uid, t in store.templates().items()}
+        hits = {k: v for k, v in hits.items() if v >= SAME_PERSON}
+        if hits:
+            out[subject] = hits
+    return out
+
+
+def run_clip(meta_path: Path, provider=None, enrollment: bool = False, aliases: dict | None = None) -> dict:
     meta = json.loads(meta_path.read_text())
     frames = _clip_frames(meta_path)
     res = engine.analyse(frames, None, None, provider=provider,
@@ -124,6 +144,7 @@ def run_clip(meta_path: Path, provider=None, enrollment: bool = False) -> dict:
     ident = res.get("identity") or {}
     scores = ident.get("scores") or {}
     subject = meta["subject"]
+    same = {subject, *((aliases or {}).get(subject) or {})}
     return {
         "clip": str(meta_path.parent.relative_to(DATA)),
         "label": meta["label"], "subject": subject, "note": meta.get("note", ""),
@@ -133,8 +154,9 @@ def run_clip(meta_path: Path, provider=None, enrollment: bool = False) -> dict:
         "checks": {k: (live.get("checks", {}).get(k) or {}).get("score") for k in CHECKS},
         "blink": (live.get("checks", {}).get("blink") or {}).get("blinked"),
         "best_user": ident.get("user_id"), "best_sim": ident.get("similarity"),
-        "genuine_sim": scores.get(subject),
-        "impostor_sims": [v for k, v in scores.items() if k != subject],
+        "best_is_subject": ident.get("user_id") in same,
+        "genuine_sim": max((v for k, v in scores.items() if k in same), default=None),
+        "impostor_sims": [v for k, v in scores.items() if k not in same],
         "good_frames": res["quality"]["good_frames"], "frames": res["quality"]["frames"],
         "occlusion": res.get("occlusion") or {},
         "quality_issues": res["quality"]["issues"], "blur": res["quality"]["blur"],
@@ -151,7 +173,8 @@ def liveness_reject(r: dict, deny: float) -> bool:
     return r["liveness"] is None or bool(r["vetoes"]) or r["liveness"] < deny
 
 
-def summarise(rows: list[dict], provider: str | None = None, with_splits: bool = True) -> dict:
+def summarise(rows: list[dict], provider: str | None = None, with_splits: bool = True,
+              same_person: dict | None = None) -> dict:
     lc, ic = CFG["liveness"], identity_thresholds(provider)
     live = [r for r in rows if r["label"] in BONA_FIDE]
     attacks = [r for r in rows if r["label"] in ATTACKS]
@@ -186,7 +209,8 @@ def summarise(rows: list[dict], provider: str | None = None, with_splits: bool =
     imp = [s for r in live_id for s in r["impostor_sims"]]
     fr = sum(s < ic["match"] for s in gen)
     fa = sum(s >= ic["match"] for s in imp)
-    rank1 = sum(r["best_user"] == r["subject"] for r in live_id if r["genuine_sim"] is not None)
+    rank1 = sum(r.get("best_is_subject", r["best_user"] == r["subject"])
+                for r in live_id if r["genuine_sim"] is not None)
     face_acc = rate((len(gen) - fr) + (len(imp) - fa), len(gen) + len(imp))
 
     # ---- decision time ------------------------------------------------------------
@@ -275,6 +299,7 @@ def summarise(rows: list[dict], provider: str | None = None, with_splits: bool =
                        "identity_match": ic["match"], "identity_borderline": ic["borderline"],
                        "identity_provider": ic["provider"]},
         "eval_gallery": sorted({r["subject"] for r in rows if r.get("enrollment")}),
+        "same_person": same_person or {},
         "headline": {
             "liveness_accuracy": liveness_acc,
             "face_auth_accuracy": face_acc,
@@ -296,14 +321,15 @@ def evaluate(progress=None) -> dict:
     warmup()
     paths = find_clips(DATA / "clips")
     gallery, enroll_clips = build_gallery(paths)
+    aliases = same_people(gallery)
     # with test subjects in the gallery, score everyone with local ArcFace (the gallery's model)
     provider = EvalGallery(gallery) if gallery else None
     rows = []
     for i, p in enumerate(paths):
-        rows.append(run_clip(p, provider, p in enroll_clips))
+        rows.append(run_clip(p, provider, p in enroll_clips, aliases))
         if progress:
             progress(i + 1, len(paths), rows[-1])
-    out = summarise(rows, "local_arcface" if provider else None)
+    out = summarise(rows, "local_arcface" if provider else None, same_person=aliases)
     dest = DATA / "eval"
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "results.json").write_text(json.dumps(out, indent=1, default=float))
