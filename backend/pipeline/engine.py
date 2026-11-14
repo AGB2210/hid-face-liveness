@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import liveness as lv
+from . import occlusion
 from .config import CFG
 from .frames import ISSUE_TEXT, Frame, analyse_frame, decode
 from .identity import get_provider, identity_thresholds
@@ -107,6 +108,7 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
         # A remote provider (Rekognition) is a network call: run it while liveness computes.
         fut = _POOL.submit(_safe_identify, provider, top, claimed_id) if provider.remote else None
         live = lv.run_all(face_frames, top)
+        occ = occlusion.analyse(top)
         t_live = time.perf_counter()
         if fut is None:
             ident = _safe_identify(provider, top, claimed_id)
@@ -122,6 +124,7 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
     bonus = CFG["challenge"]["pass_bonus"] if action_ok else 0.0
     fused, vetoes = fuse(live, bonus)
     result["liveness"] = {"score": round(fused, 3), "checks": live, "vetoes": vetoes}
+    result["occlusion"] = occ
     result["identity"] = ident
 
     ic = identity_thresholds(provider_name)
@@ -136,6 +139,10 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
         d = _decision(DENY, vetoes, max(0.9, 1 - fused))
     elif fused < lc["deny"]:
         d = _decision(DENY, ["Liveness check failed - possible spoof"], 1 - fused)
+    elif occ.get("sunglasses") or occ.get("mask"):
+        items = [x for x, on in (("sunglasses", occ.get("sunglasses")), ("face mask", occ.get("mask"))) if on]
+        d = _decision(VERIFY, [f"Please remove your {' and '.join(items)} and look at the camera"],
+                      0.0, next_step="recapture")
     elif ident.get("error"):
         d = _decision(VERIFY, ["Identity service unavailable - please try again"], 0.0, next_step="recapture")
     elif not ident["user_id"] or sim < ic["borderline"]:

@@ -34,7 +34,7 @@ identity:
     borderline: 0.75
     region: us-east-1
     collection_id: hid-kiosk-faces
-    enroll_faces: 3         # face crops indexed per user
+    enroll_faces: 4         # face crops indexed per user (straight, left, right, without glasses)
 
 liveness:
   weights:
@@ -65,6 +65,11 @@ glare:
   clean_frac: 0.004         # saturated-pixel fraction below this -> fine
   glare_frac: 0.04          # above this -> strong specular glare
 
+occlusion:                  # accessories -> guidance (never a deny on their own)
+  eye_dark_ratio: 0.45      # eye region / cheek brightness below this -> sunglasses
+  lip_redness_min: -4.0     # lips not redder than own cheeks (Cr) ...
+  lower_dist_min: 12.0      # ... and lower face a different colour (CrCb) -> face mask
+
 challenge:
   ttl_s: 30
   blink_thresh: 0.45        # MediaPipe eyeBlink blendshape
@@ -73,8 +78,18 @@ challenge:
   max_otp_tries: 3
   otp_digits: 6
 
+enrollment:
+  require_turns: true        # guided capture must include a left and a right head turn
+  min_turn_deg: 10
+  require_liveness: true     # reject enrolling a photo / screen
+
 # Overrides applied when HID_PROFILE is set (the AWS deployment uses "cloud").
 profiles:
+  test:                      # automated tests: synthetic still images can't blink or turn their head
+    enrollment:
+      require_turns: false
+    challenge:
+      turn_deg: -100         # any head-turn cue counts as passed
   cloud:
     capture:
       width: 640          # smaller frames -> faster upload over the internet

@@ -20,10 +20,11 @@ _otps: dict[str, dict] = {}
 OUTBOX: list[dict] = []   # mock "SMS" messages shown on the demo phone panel
 
 
-def new_challenge(candidate: str | None, claimed_id: str | None) -> dict:
+def new_challenge(candidate: str | None, claimed_id: str | None, avoid: str | None = None) -> dict:
+    """avoid='blink' when the eyes can't be seen (e.g. sunglasses): a head turn is just as random."""
     ch = {
         "id": uuid.uuid4().hex,
-        "action": secrets.choice(list(ACTIONS)),
+        "action": secrets.choice([a for a in ACTIONS if a != avoid] or list(ACTIONS)),
         "candidate": candidate,
         "claimed_id": claimed_id,
         "expires": time.time() + CFG["challenge"]["ttl_s"],

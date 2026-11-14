@@ -43,7 +43,8 @@
     const $ = (id) => document.getElementById(id);
     const COL = { ALLOW: "var(--allow)", REQUEST_VERIFICATION: "var(--verify)", DENY: "var(--deny)" };
     const SHORT = { ALLOW: "Allow", REQUEST_VERIFICATION: "Verify", DENY: "Deny" };
-    const NAMES = { live: "Live person", print: "Printed photo", screen_photo: "Screen replay (photo)", video_replay: "Video replay", mask: "Mask" };
+    const NAMES = { live: "Live person", live_glasses: "Live, clear glasses", live_sunglasses: "Live, sunglasses", live_mask: "Live, face mask",
+                    print: "Printed photo", screen_photo: "Screen replay (photo)", video_replay: "Video replay", mask: "Mask" };
     const CHECK = { minifas: "Anti-spoof CNN (MiniFASNet)", flatness: "3-D motion (flatness)", moire: "Screen pattern (moire)", glare: "Specular glare", fused: "Fused (all checks)" };
 
     const p = (r, d = 1) => (r?.rate == null ? "n/a" : `${(100 * r.rate).toFixed(d)}%`);
@@ -116,6 +117,15 @@
         }).join("")}</table>
         <p class="small muted">Live people: ${r.live_outcomes.ALLOW} allowed straight away, ${r.live_outcomes.REQUEST_VERIFICATION} asked for an extra check, ${r.live_outcomes.DENY} denied.</p></section>`;
 
+      const acc = Object.entries(r.accessories || {});
+      if (acc.length) {
+        html += `<section class="card"><h2>Real people with accessories</h2>
+          <p class="small muted">Clear glasses should be let in. Sunglasses and face masks should get guidance ("please remove…"), never a deny.</p>
+          <table><tr><th>Scenario</th><th>Clips</th><th>Allowed</th><th>Guided</th><th>Denied</th><th>Accessory detected</th><th>BPCER</th><th>Expected</th></tr>
+          ${acc.map(([k, a]) => `<tr><td>${esc(a.name)}</td><td>${a.clips}</td><td>${p(a.allowed, 0)}</td><td>${p(a.guided, 0)}</td>
+            <td${a.denied.rate > 0 ? ' style="color:var(--deny)"' : ""}>${p(a.denied, 0)}</td><td>${p(a.detected, 0)}</td><td>${p(a.bpcer, 0)}</td>
+            <td class="muted small">${a.expected === "allow" ? "allow" : "guidance"}</td></tr>`).join("")}</table></section>`;
+      }
       html += `<section class="card"><h2>Decision time (capture + processing)</h2>${histogram(t)}
         <p class="small muted">Processing only: median ${t.processing_p50} ms, 95th pct ${t.processing_p95} ms. Capture burst ≈ 1.0 s. Measured on a laptop CPU, no GPU.</p></section>`;
 

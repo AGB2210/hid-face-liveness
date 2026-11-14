@@ -16,9 +16,16 @@
       <div class="cam" id="cam">
         <video id="video" playsinline muted></video>
         <div class="guide"></div>
+        <div class="instruction" id="instruction"></div>
         <div class="banner" id="banner">Starting camera</div>
         <div class="progress" id="progress"></div>
       </div>
+      <div class="posebar" aria-hidden="true">
+        <span class="zone l"></span><span class="zone c"></span><span class="zone r"></span><i id="yawDot"></i>
+      </div>
+      <ol class="steps" id="steps">
+        <li data-k="front">Look straight</li><li data-k="left">Turn left</li><li data-k="right">Turn right</li><li data-k="bare" class="hidden">No glasses</li>
+      </ol>
       <div class="card hidden" id="qrCard">
         <h2>Authenticator app (offline second factor)</h2>
         <div class="row" style="align-items:flex-start;gap:24px">
@@ -39,8 +46,9 @@
             <label style="flex:1">Access valid until <input id="valid" type="date" /></label>
           </div>
           <label>Phone (SMS fallback, demo only) <input id="phone" placeholder="+91 …" /></label>
-          <button type="submit" id="go">Capture and enroll</button>
-          <div id="msg" class="small muted">Face the camera in good light. Move your head very slightly during the 2-second capture.</div>
+          <span class="check"><input type="checkbox" id="glasses" /> I wear glasses (adds a pose without them)</span>
+          <button type="submit" id="go">Start guided capture</button>
+          <div id="msg" class="small muted">Three quick poses: straight, left, right. Each one captures automatically when you hold it.</div>
         </form>
       </div>
     </section>
@@ -53,6 +61,7 @@
   </section>
   <script type="module">
     import { captureBurst, esc, framesForm, getConfig, postForm, startCamera } from "./common.js";
+    import { createTracker, hint, track } from "./facetrack.js";
     const $ = (id) => document.getElementById(id);
     const cfg = await getConfig();
     const roles = cfg.roles || {};
@@ -97,35 +106,123 @@
       }
     });
 
+    // ---------------------------------------------------------------- guided pose capture
+    const BASE_STEPS = [
+      { k: "front", say: "Look straight at the camera", ok: (s) => Math.abs(s.yaw) < 8 },
+      { k: "left", say: "Slowly turn your head to your left", ok: (s) => s.yaw >= 15 && s.yaw <= 40 },
+      { k: "right", say: "Now turn your head to your right", ok: (s) => s.yaw <= -15 && s.yaw >= -40 },
+    ];
+    const BARE = { k: "bare", say: "Take off your glasses and look straight", ok: (s) => Math.abs(s.yaw) < 8, pause: 2500 };
+    let STEPS = BASE_STEPS;
+    $("glasses").addEventListener("change", () => {
+      STEPS = $("glasses").checked ? [...BASE_STEPS, BARE] : BASE_STEPS;
+      document.querySelector('#steps li[data-k="bare"]').classList.toggle("hidden", !$("glasses").checked);
+    });
+    let tracker = null, latest = null;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const say = (t) => { $("instruction").textContent = t; $("instruction").style.display = t ? "block" : "none"; };
+    function setStep(k, state) {
+      document.querySelectorAll("#steps li").forEach((li) => {
+        if (li.dataset.k === k) li.className = state;
+      });
+    }
+    function drawYaw(s) {
+      const dot = $("yawDot");
+      if (!s?.present || s.yaw == null) { dot.style.opacity = 0.25; return; }
+      dot.style.opacity = 1;
+      // mirrored view: turning to your left moves the dot left
+      const x = 50 - Math.max(-40, Math.min(40, s.yaw)) / 40 * 46;
+      dot.style.left = `${x}%`;
+    }
+
+    async function waitForPose(step, timeoutMs = 25000) {
+      const t0 = performance.now();
+      let heldSince = null;
+      while (performance.now() - t0 < timeoutMs) {
+        const s = latest, h = hint(s);
+        if (!h && s.yaw != null && step.ok(s)) {
+          heldSince ??= performance.now();
+          $("banner").textContent = "Hold it";
+          if (performance.now() - heldSince > 350) return true;
+        } else {
+          heldSince = null;
+          $("banner").textContent = h || step.say;
+        }
+        await sleep(60);
+      }
+      return false;
+    }
+
+    async function guidedCapture() {
+      const blobs = [], labels = [];
+      for (const [i, step] of STEPS.entries()) {
+        STEPS.forEach((x, j) => setStep(x.k, j < i ? "done" : j === i ? "active" : ""));
+        say(`${i + 1} of ${STEPS.length} · ${step.say}`);
+        if (step.pause) await sleep(step.pause);  // time to take the glasses off
+        if (!(await waitForPose(step))) throw new Error(`Timed out waiting for: ${step.say.toLowerCase()}`);
+        $("cam").classList.add("capturing");
+        const shot = await captureBurst($("video"), 3, 400, cfg.capture.jpeg_quality,
+          (p) => ($("progress").style.width = `${((i + p) / STEPS.length) * 100}%`));
+        $("cam").classList.remove("capturing");
+        blobs.push(...shot.blobs);
+        labels.push(...shot.blobs.map(() => step.k));
+        setStep(step.k, "done");
+      }
+      say("");
+      return { blobs, labels };
+    }
+
+    async function timedCapture() {
+      // fallback when the in-browser tracker can't load: talk the person through a 3 s turn
+      say("Look straight, then slowly turn left and right");
+      $("cam").classList.add("capturing");
+      const { blobs } = await captureBurst($("video"), 12, 3000, cfg.capture.jpeg_quality,
+        (p) => ($("progress").style.width = `${p * 100}%`));
+      say("");
+      return { blobs, labels: [] };
+    }
+
     $("form").addEventListener("submit", async (e) => {
       e.preventDefault();
       $("go").disabled = true;
-      $("msg").textContent = "Capturing. Hold still.";
-      $("cam").classList.add("capturing");
+      $("msg").textContent = "Follow the instructions on the camera.";
       try {
-        const { blobs } = await captureBurst($("video"), 10, 2000, cfg.capture.jpeg_quality,
-          (p) => ($("progress").style.width = `${p * 100}%`));
+        const { blobs, labels } = tracker ? await guidedCapture() : await timedCapture();
+        $("banner").textContent = "Checking liveness and enrolling";
         $("msg").textContent = "Processing";
         const r = await postForm("/api/enroll", framesForm(blobs, {
           user_id: $("uid").value.trim(), name: $("name").value.trim(), phone: $("phone").value.trim(),
-          role: $("role").value, valid_until: $("valid").value }));
-        $("msg").textContent = `Enrolled ${r.user_id} with ${r.templates} face templates. Scan the QR code with an authenticator app.`;
+          role: $("role").value, valid_until: $("valid").value, poses: labels.join(",") }));
+        $("msg").textContent = `Enrolled ${r.user_id}: ${r.templates} face templates (${Object.keys(r.poses).filter((k) => r.poses[k]).join(", ")}), ` +
+          `liveness ${r.liveness.score.toFixed(2)}. Scan the QR code with an authenticator app.`;
+        $("banner").textContent = "Enrolled";
         $("cam").className = "cam allow";
         showQr(r.authenticator, r.user_id);
         loadUsers();
       } catch (err) {
-        $("msg").textContent = `Failed: ${err.message}`;
+        say("");
+        $("msg").textContent = `Not enrolled: ${err.message}`;
+        $("banner").textContent = "Try again";
         $("cam").className = "cam deny";
       } finally {
         $("go").disabled = false;
         $("progress").style.width = "0";
+        STEPS.forEach((x) => setStep(x.k, ""));
         setTimeout(() => ($("cam").className = "cam"), 2500);
       }
     });
 
     loadUsers();
-    try { await startCamera($("video"), cfg.capture.width); $("banner").textContent = "Align your face within the frame"; }
-    catch (e) { $("banner").textContent = `Camera unavailable: ${e.message}`; }
+    try {
+      await startCamera($("video"), cfg.capture.width);
+      $("banner").textContent = "Align your face within the frame";
+      try {
+        tracker = await createTracker();
+        track(tracker, $("video"), (s) => { latest = s; drawYaw(s); });
+      } catch (err) {
+        $("msg").textContent = "Live pose guidance unavailable - using a timed capture instead.";
+      }
+    } catch (e) { $("banner").textContent = `Camera unavailable: ${e.message}`; }
   </script>
 </body>
 </html>

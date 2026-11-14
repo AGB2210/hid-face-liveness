@@ -43,12 +43,13 @@
     import { captureBurst, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
     const $ = (id) => document.getElementById(id);
     const cfg = await getConfig();
-    const NAMES = { live: "Live person", print: "Printed photo", screen_photo: "Screen (photo)", video_replay: "Video replay", mask: "Mask" };
+    const NAMES = { live: "Live person", live_glasses: "Live, glasses", live_sunglasses: "Live, sunglasses", live_mask: "Live, face mask",
+                    print: "Printed photo", screen_photo: "Screen (photo)", video_replay: "Video replay", mask: "Mask" };
     let counts = await (await fetch("/api/clips/counts")).json();
 
     function drawLabels() {
       $("labels").innerHTML = cfg.labels.map((l) =>
-        `<button data-label="${l}" class="${l === "live" ? "" : "secondary"}">${NAMES[l]}<span class="n">${counts[l] ?? 0} clips</span></button>`).join("");
+        `<button data-label="${l}" class="${l.startsWith("live") ? "" : "secondary"}">${NAMES[l]}<span class="n">${counts[l] ?? 0} clips</span></button>`).join("");
     }
     const users = await (await fetch("/api/users")).json();
     $("subject").innerHTML = users.length ? users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("")

@@ -209,6 +209,19 @@ label.inline input:disabled { color: var(--muted); }
 .verdict { font: 500 22px/1.2 var(--sans); }
 .verdict.inside { color: var(--allow); } .verdict.grace { color: var(--verify); } .verdict.outside { color: var(--deny); }
 
+/* ---------- guided enrollment ---------------------------------------------------- */
+.posebar { position: relative; height: 14px; margin-top: -4px; }
+.posebar::before { content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 1px; background: var(--line-strong); }
+.posebar .zone { position: absolute; top: 4px; height: 5px; background: var(--paper-2); border: 1px solid var(--line); }
+.posebar .zone.l { left: 6%; width: 22%; } .posebar .zone.c { left: 41%; width: 18%; } .posebar .zone.r { right: 6%; width: 22%; }
+.posebar i { position: absolute; top: 1px; width: 2px; height: 12px; background: var(--ink); left: 50%; transition: left .08s linear; }
+.steps { counter-reset: step; list-style: none; display: flex; gap: 0; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.steps li { flex: 1; padding: 10px 0 0; font: 500 12px/1.2 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); counter-increment: step; }
+.steps li::before { content: counter(step, decimal-leading-zero) "  "; color: var(--line-strong); }
+.steps li.active { color: var(--ink); }
+.steps li.done { color: var(--allow); }
+.steps li.done::before { content: "\2713  "; color: var(--allow); }
+
 /* ---------- record page label grid -------------------------------------------- */
 .labels { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .labels button { text-align: left; padding: 14px 14px 12px; line-height: 1.25; }

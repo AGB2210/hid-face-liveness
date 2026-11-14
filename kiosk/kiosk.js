@@ -1,9 +1,12 @@
 import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
+import { createTracker, hint, track } from "./facetrack.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
 const decisionEl = $("decision"), startBtn = $("start"), instruction = $("instruction");
 let cfg, busy = false, resetTimer = null, otpSession = null;
+let lastStatus = null, latest = null, armed = true, alignedSince = null, absentSince = null, lastOcclusion = null;
+const CUE_LABEL = { blink: "Blink", turn_left: "Turn left", turn_right: "Turn right" };
 
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
@@ -46,6 +49,7 @@ function initContext() {
 async function refreshStatus() {
   try {
     const s = await (await fetch("/api/node/status")).json();
+    lastStatus = s;
     const off = s.mode === "offline";
     const el = $("netStatus");
     el.className = `net ${off ? "off" : "on"}`;
@@ -78,6 +82,9 @@ function showDecision(res, totalMs) {
     rows.push(["Zone", esc(c.zone_name) + (c.security === "high" ? " · high security" : "")]);
     rows.push(["Schedule", `${VERDICT[c.verdict] || c.verdict} · ${esc(c.time)}`]);
   }
+  const occ = res.occlusion;
+  if (occ && (occ.sunglasses || occ.mask)) rows.push(["Accessories", [occ.sunglasses && "sunglasses", occ.mask && "face mask"].filter(Boolean).join(", ") + " detected"]);
+  if (res.challenge) rows.push(["Live cue", `${CUE_LABEL[res.challenge.action] || res.challenge.action} · ${res.challenge.passed ? "passed" : "not detected"}`]);
   if (res.mode) rows.push(["Mode", res.mode === "offline" ? "Offline fail-safe" : "Online"]);
   const network = Math.max(0, Math.round(totalMs - (res.capture_ms || 0) - (t.processing || 0)));
   decisionEl.innerHTML = `
@@ -120,22 +127,39 @@ async function burst(n, durationMs) {
 /* ---------------------------------------------------------------- flow */
 async function runCheck() {
   if (busy) return;
+  armed = false;
   busy = true;
   startBtn.disabled = true;
   clearTimeout(resetTimer);
   $("otpCard").classList.add("hidden");
   otpSession = null;
   try {
-    banner.textContent = "Hold still";
     decisionEl.className = "decision idle";
     decisionEl.innerHTML = `<div class="eyebrow">Decision</div><div class="big">Checking</div><p class="why">Capturing and analysing.</p>`;
-    const shot = await burst(cfg.capture.frames, cfg.capture.duration_ms);
+    // Risk-based friction: high-security zones and offline mode get a random live cue up front
+    const zoneSec = cfg.zones?.[context().zone]?.security;
+    let cue = null;
+    if (zoneSec === "high" || lastStatus?.mode === "offline") {
+      // eyes hidden last time (sunglasses)? ask for a head turn instead of a blink
+      cue = await postForm("/api/cue", framesForm([], { zone: context().zone, avoid: lastOcclusion?.sunglasses ? "blink" : "" }));
+      instruction.textContent = `Get ready: ${cue.instruction}`;
+      instruction.style.display = "block";
+      await new Promise((r) => setTimeout(r, 900));
+      instruction.textContent = `${cue.instruction} now`;
+      banner.textContent = cue.instruction;
+    } else {
+      banner.textContent = "Hold still";
+    }
+    const shot = cue ? await burst(cue.frames, cue.duration_ms) : await burst(cfg.capture.frames, cfg.capture.duration_ms);
+    instruction.style.display = "none";
     banner.textContent = "Analysing";
     const t0 = performance.now() - shot.captureMs;
     const res = await postForm("/api/verify", framesForm([shot.lastBlob], {
-      claimed_id: $("claimed").value, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() }));
+      claimed_id: $("claimed").value, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n,
+      challenge_id: cue ? cue.id : "", ...context() }));
     const total = performance.now() - t0;
     postForm("/api/timing", framesForm([], { total_ms: total })).catch(() => {});
+    lastOcclusion = res.occlusion || null;
     showDecision(res, total);
     await handleNext(res);
   } catch (e) {
@@ -235,6 +259,37 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+function onTrack(s) {
+  latest = s;
+  if (busy || otpSession) return;
+  const now = performance.now();
+  if (!s.present) {
+    absentSince ??= now;
+    alignedSince = null;
+    if (now - absentSince > 1200) {
+      armed = true;  // the previous person has left: ready for the next one
+      if (!decisionEl.classList.contains("idle")) idle();
+    }
+    if (decisionEl.classList.contains("idle")) banner.textContent = "Step in front of the camera";
+    return;
+  }
+  absentSince = null;
+  if (!decisionEl.classList.contains("idle")) return;
+  const h = hint(s);
+  if (h || !armed || !$("auto").checked) {
+    alignedSince = null;
+    banner.textContent = h || (armed ? "Align your face within the frame" : "Step away and back to check again, or press Start");
+    return;
+  }
+  alignedSince ??= now;
+  banner.textContent = "Hold still";
+  if (now - alignedSince > 700) {
+    armed = false;
+    alignedSince = null;
+    runCheck();
+  }
+}
+
 (async () => {
   cfg = await getConfig();
   initContext();
@@ -244,6 +299,13 @@ document.addEventListener("keydown", (e) => {
   try {
     await startCamera(video, cfg.capture.width);
     idle();
+    try {
+      const tracker = await createTracker();
+      track(tracker, video, onTrack, 10);
+    } catch {
+      $("auto").checked = false;
+      $("auto").disabled = true;  // live guidance unavailable - Start / Space still work
+    }
   } catch (e) {
     banner.textContent = `Camera unavailable: ${e.message}`;
   }

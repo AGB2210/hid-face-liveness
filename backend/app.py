@@ -32,7 +32,7 @@ from pipeline.frames import analyse_frame, decode  # noqa: E402
 from pipeline.identity import get_provider, provider_name  # noqa: E402
 from pipeline.models import models_lock, warmup  # noqa: E402
 
-LABELS = ["live", "print", "screen_photo", "video_replay", "mask"]
+LABELS = ["live", "live_glasses", "live_sunglasses", "live_mask", "print", "screen_photo", "video_replay", "mask"]
 CLIPS = DATA / "clips"
 
 app = FastAPI(title="HID Liveness Kiosk")
@@ -88,6 +88,13 @@ async def _read(frames: list[UploadFile]) -> list[bytes]:
     return [await f.read() for f in frames]
 
 
+@app.get("/assets/face_landmarker.task")
+def landmarker_model():
+    """Same MediaPipe model the server uses, for live guidance in the browser."""
+    from fastapi.responses import FileResponse
+    return FileResponse(ROOT / "models" / "face_landmarker.task", media_type="application/octet-stream")
+
+
 @app.get("/api/config")
 def config() -> dict:
     pol = node.current_policy()
@@ -115,25 +122,70 @@ def delete_user(user_id: str) -> dict:
 
 @app.post("/api/enroll")
 async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
-                 role: str = Form("student"), valid_until: str = Form(""),
+                 role: str = Form("student"), valid_until: str = Form(""), poses: str = Form(""),
                  frames: list[UploadFile] = File(...)) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", user_id):
         raise HTTPException(400, "user_id: letters, digits, _ . - only")
-    imgs = decode(await _read(frames))
+    jpegs = await _read(frames)
+    return await run_in_threadpool(_enroll, user_id, name, phone, role, valid_until, jpegs, poses)
+
+
+def _enroll(user_id, name, phone, role, valid_until, jpegs, poses: str = "") -> dict:
+    """Guided enrollment: frames cover straight, left and right head poses. The turns make the
+    3-D flatness test conclusive, so a photo or screen can't be enrolled in someone's name,
+    and templates from several angles make later matching more robust."""
+    from pipeline import liveness as lv
+    ec = CFG["enrollment"]
+    imgs = decode(jpegs)
     with models_lock():
         fr = [analyse_frame(i, im) for i, im in enumerate(imgs)]
-        good = sorted([f for f in fr if f.good], key=lambda f: f.rank, reverse=True)[:5]
+        labels = [x.strip() for x in poses.split(",")] if poses else []
+        pose_of = {id(f): (labels[i] if len(labels) == len(fr) else None) for i, f in enumerate(fr)}
+        good = [f for f in fr if f.good]
+        face_frames = [f for f in fr if f.box is not None and f.mesh is not None]
         if len(good) < 2:
             issues = sorted({i for f in fr for i in f.issues})
             raise HTTPException(422, f"Not enough good-quality frames ({len(good)}). Issues: {issues}")
+        yaws = [f.yaw for f in face_frames]
+        turned = {"left": max(yaws) if yaws else 0.0, "right": -min(yaws) if yaws else 0.0}
+        if ec["require_turns"] and min(turned.values()) < ec["min_turn_deg"]:
+            raise HTTPException(422, f"Please turn your head left and right during enrollment "
+                                     f"(measured {turned['left']:.0f} deg left, {turned['right']:.0f} deg right)")
+        top = sorted(good, key=lambda f: f.rank, reverse=True)[:3]
+        live = lv.run_all(face_frames, top)
+        fused, vetoes = engine.fuse(live)
+        if ec["require_liveness"] and (vetoes or fused < CFG["liveness"]["deny"]):
+            raise HTTPException(422, "Enrollment rejected: liveness check failed (" +
+                                ("; ".join(vetoes) or f"score {fused:.2f}") + "). Enroll in person, not from a photo or screen.")
+        # templates: best frontal frame, best left and right views, then (if the person wears
+        # glasses) the best frontal frame without them, then more frontal frames
+        bare_frames = [f for f in good if pose_of[id(f)] == "bare"]
+        worn = [f for f in good if pose_of[id(f)] != "bare"]
+        front = sorted([f for f in worn if abs(f.yaw) < 10], key=lambda f: f.rank, reverse=True)
+        left = max((f for f in worn if f.yaw >= 8), key=lambda f: f.rank, default=None)
+        right = max((f for f in worn if f.yaw <= -8), key=lambda f: f.rank, default=None)
+        bare = max(bare_frames, key=lambda f: f.rank, default=None)
+        chosen = front[:1] + [x for x in (left, right, bare) if x] + front[1:3]
+        for f in sorted(good, key=lambda f: f.rank, reverse=True):  # top up to 5 with the best others
+            if len(chosen) >= 5:
+                break
+            if all(f is not c for c in chosen):
+                chosen.append(f)
         try:
-            n = get_provider().enroll(user_id, name, phone or None, good)
+            n = get_provider().enroll(user_id, name, phone or None, chosen)
         except ValueError as e:
             raise HTTPException(422, str(e))
         except Exception as e:  # AWS credentials / network
             raise HTTPException(502, f"Identity provider error: {type(e).__name__}: {e}"[:300])
     store.set_access(user_id, role, valid_until or None)
+    poses = {"front": bool(front), "left": left is not None, "right": right is not None}
+    if bare_frames:
+        poses["without glasses"] = bare is not None
+    store.append_audit(node.KIOSK_ID, None, user_id, "ENROLLED", "enroll", node.mode(), round(fused, 3), None, None,
+                       [f"Enrollment liveness {fused:.2f}", f"poses: {', '.join(k for k, v in poses.items() if v)}"])
     return {"ok": True, "user_id": user_id, "templates": n, "provider": provider_name(),
+            "liveness": {"score": round(fused, 3), "checks": live},
+            "turn_deg": {k: round(v, 1) for k, v in turned.items()}, "poses": poses,
             "authenticator": _new_totp(user_id, name)}
 
 
@@ -184,6 +236,21 @@ def policy_test(zone: str = Form(...), user_id: str = Form(""), role: str = Form
                 valid_until: str = Form(""), at: str = Form("")) -> dict:
     user = store.get_user(user_id) if user_id else {"role": role or "visitor", "valid_until": valid_until or None}
     return policy.evaluate(user, zone, at or None, node.current_policy())
+
+
+def cue_required(zone: str, offline: bool) -> bool:
+    """Risk-based friction: a random live cue (blink / head turn) only where it matters."""
+    z = node.current_policy()["zones"].get(zone, {})
+    return offline or z.get("security") == "high"
+
+
+@app.post("/api/cue")
+def cue(zone: str = Form(""), avoid: str = Form("")) -> dict:
+    zone = zone or CFG["access"]["default_zone"]
+    ch = sessions.new_challenge(None, None, avoid=avoid if avoid == "blink" else None)
+    return {"required": cue_required(zone, node.offline()), "id": ch["id"], "action": ch["action"],
+            "instruction": ch["instruction"], "duration_ms": CFG["capture"]["challenge_duration_ms"],
+            "frames": CFG["capture"]["challenge_frames"]}
 
 
 @app.get("/api/node/status")
@@ -265,11 +332,13 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames, zon
         res["timing_ms"]["streamed_frames"] = len(pre)
         res["timing_ms"]["analysed_during_capture"] = round(pre_ms, 1)
 
-    _apply_context(res, zone, at or None, offline)
+    cue_passed = bool(challenge) and bool((res.get("challenge") or {}).get("passed"))
+    _apply_context(res, zone, at or None, offline, cue_passed)
 
     if res["decision"] == engine.VERIFY and res["next"] == "challenge":
         cand = res["identity"]["user_id"] if res.get("identity") else None
-        ch = sessions.new_challenge(cand, claimed_id or None)
+        eyes_hidden = bool((res.get("occlusion") or {}).get("sunglasses"))
+        ch = sessions.new_challenge(cand, claimed_id or None, avoid="blink" if eyes_hidden else None)
         res["challenge_request"] = {
             "id": ch["id"], "action": ch["action"], "instruction": ch["instruction"],
             "duration_ms": CFG["capture"]["challenge_duration_ms"],
@@ -295,13 +364,15 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames, zon
     return res
 
 
-def _apply_context(res: dict, zone: str, at: str | None, offline: bool) -> None:
+def _apply_context(res: dict, zone: str, at: str | None, offline: bool, cue_passed: bool = False) -> None:
     """Biometrics say who is there and that they are live; the schedule says whether they may
     enter here, now. Offline, the kiosk never fails open: high-security zones close, and every
     other entry needs the authenticator-app code on top of liveness + the cached template."""
     res["mode"] = "offline" if offline else "online"
     ident = res.get("identity") or {}
     user = store.get_user(ident["user_id"]) if ident.get("user_id") else None
+    if res["decision"] == engine.VERIFY and res.get("next") == "recapture" and not user:
+        return  # guidance first (e.g. remove sunglasses), identity is checked on the retry
     if res["decision"] == engine.DENY or not user:
         if offline and res["decision"] != engine.DENY:
             res.update(decision=engine.DENY, next=None,
@@ -311,6 +382,14 @@ def _apply_context(res: dict, zone: str, at: str | None, offline: bool) -> None:
     res["context"] = ctx
     if ctx["verdict"] == "outside":
         res.update(decision=engine.DENY, next=None, reasons=[ctx["reason"]])
+        return
+    if res["decision"] == engine.VERIFY and res.get("next") == "recapture":
+        return  # guidance (remove sunglasses / mask, better light) comes before cues and codes
+    # enforced server-side: a modified client can't skip the cue in high-risk situations
+    if cue_required(zone, offline) and not cue_passed and not (offline and ctx["security"] == "high"):
+        why = "offline fail-safe" if offline else f"{ctx['zone_name']} is high-security"
+        res.update(decision=engine.VERIFY, next="challenge",
+                   reasons=[f"Live cue required ({why})", ctx["reason"]])
         return
     if offline:
         age = store.template_age_days(user["id"])
@@ -326,14 +405,15 @@ def _apply_context(res: dict, zone: str, at: str | None, offline: bool) -> None:
             res.update(decision=engine.DENY, next=None, reasons=[f"Offline fail-safe: {why}"])
         else:
             res.update(decision=engine.VERIFY, next="second_factor",
-                       reasons=["Offline fail-safe: enter the code from your authenticator app", ctx["reason"]])
+                       reasons=["Offline fail-safe: live cue passed - now enter the code from your authenticator app",
+                                ctx["reason"]])
         return
     if res["decision"] == engine.ALLOW:
         if ctx["verdict"] == "grace":
             res.update(decision=engine.VERIFY, next="second_factor", reasons=[f"Step-up: {ctx['reason']}"])
         elif ctx["security"] == "high":
             res.update(decision=engine.VERIFY, next="second_factor",
-                       reasons=[f"Step-up: {ctx['zone_name']} is high-security - second factor required"])
+                       reasons=[f"Step-up: live cue passed; {ctx['zone_name']} is high-security - second factor required"])
         else:
             res["reasons"] = res["reasons"] + [ctx["reason"]]
 

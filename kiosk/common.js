@@ -123,6 +123,10 @@ export function renderDebug(res) {
     const via = id.api_ms !== undefined ? ` · Rekognition ${id.api_ms} ms` : "";
     rows.push(`<tr><td><b>Identity (${esc(id.mode)})</b></td><td>${bar(id.similarity)}</td><td class="muted small">${esc(id.error || id.name || "no match")}${esc(via)} ${esc(JSON.stringify(id.scores || {}))}</td></tr>`);
   }
+  if (res.occlusion && res.occlusion.eye_ratio !== undefined) {
+    const o = res.occlusion;
+    rows.push(`<tr><td>Accessories</td><td>${o.sunglasses || o.mask ? [o.sunglasses && "sunglasses", o.mask && "face mask"].filter(Boolean).join(", ") : "none detected"}</td><td class="muted small">eyes/cheeks ${o.eye_ratio} · lip redness ${o.lip_redness} · lower-face colour shift ${o.lower_dist}</td></tr>`);
+  }
   if (res.challenge) {
     rows.push(`<tr><td>Challenge: ${esc(res.challenge.action)}</td><td>${res.challenge.passed ? "passed" : "failed"}</td><td class="muted small">${esc(JSON.stringify(res.challenge))}</td></tr>`);
   }

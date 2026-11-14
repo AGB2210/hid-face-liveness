@@ -22,7 +22,12 @@ from pipeline.config import CFG, DATA
 from pipeline.identity import identity_thresholds
 
 ATTACKS = ["print", "screen_photo", "video_replay", "mask"]
-LABEL_NAMES = {"live": "Live person", "print": "Printed photo", "screen_photo": "Screen replay (photo)",
+BONA_FIDE = ["live", "live_glasses"]              # how people normally present themselves
+OCCLUDED = ["live_sunglasses", "live_mask"]       # real people, expected outcome: guidance
+LIVE_VARIANTS = BONA_FIDE + OCCLUDED
+ALL_LABELS = LIVE_VARIANTS + ATTACKS
+LABEL_NAMES = {"live": "Live person", "live_glasses": "Live, clear glasses", "live_sunglasses": "Live, sunglasses",
+               "live_mask": "Live, face mask", "print": "Printed photo", "screen_photo": "Screen replay (photo)",
                "video_replay": "Video replay", "mask": "Mask"}
 CHECKS = ["minifas", "flatness", "moire", "glare"]
 DECISIONS = ["ALLOW", "REQUEST_VERIFICATION", "DENY"]
@@ -75,6 +80,7 @@ def run_clip(meta_path: Path) -> dict:
         "genuine_sim": scores.get(subject),
         "impostor_sims": [v for k, v in scores.items() if k != subject],
         "good_frames": res["quality"]["good_frames"], "frames": res["quality"]["frames"],
+        "occlusion": {k: (res.get("occlusion") or {}).get(k) for k in ("sunglasses", "mask")},
         "quality_issues": res["quality"]["issues"],
         "processing_ms": res["timing_ms"]["processing"],
         "capture_ms": meta.get("capture_ms") or CFG["capture"]["duration_ms"],
@@ -91,7 +97,7 @@ def liveness_reject(r: dict, deny: float) -> bool:
 
 def summarise(rows: list[dict]) -> dict:
     lc, ic = CFG["liveness"], identity_thresholds()
-    live = [r for r in rows if r["label"] == "live"]
+    live = [r for r in rows if r["label"] in BONA_FIDE]
     attacks = [r for r in rows if r["label"] in ATTACKS]
 
     # ---- liveness, per attack type ------------------------------------------------
@@ -143,7 +149,25 @@ def summarise(rows: list[dict]) -> dict:
     live_outcomes = {d: sum(r["decision"] == d for r in live) for d in DECISIONS}
 
     # ---- confusion matrix ----------------------------------------------------------
-    labels_present = [l for l in ["live"] + ATTACKS if any(r["label"] == l for r in rows)]
+    labels_present = [l for l in ALL_LABELS if any(r["label"] == l for r in rows)]
+
+    # ---- real people with accessories: who gets let in, guided, or wrongly turned away
+    accessories = {}
+    for v in LIVE_VARIANTS:
+        rs = [r for r in rows if r["label"] == v]
+        if not rs:
+            continue
+        n = len(rs)
+        accessories[v] = {
+            "name": LABEL_NAMES[v], "clips": n,
+            "allowed": rate(sum(r["decision"] == "ALLOW" for r in rs), n),
+            "guided": rate(sum(r["decision"] == "REQUEST_VERIFICATION" for r in rs), n),
+            "denied": rate(sum(r["decision"] == "DENY" for r in rs), n),
+            "bpcer": rate(sum(liveness_reject(r, lc["deny"]) for r in rs), n),
+            "detected": rate(sum(bool((r.get("occlusion") or {}).get("sunglasses") or (r.get("occlusion") or {}).get("mask"))
+                                 for r in rs), n),
+            "expected": "guidance" if v in OCCLUDED else "allow",
+        }
     confusion = {l: {d: sum(r["label"] == l and r["decision"] == d for r in rows) for d in DECISIONS}
                  for l in labels_present}
 
@@ -174,7 +198,8 @@ def summarise(rows: list[dict]) -> dict:
 
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "counts": {l: sum(r["label"] == l for r in rows) for l in ["live"] + ATTACKS},
+        "counts": {l: sum(r["label"] == l for r in rows) for l in ALL_LABELS},
+        "accessories": accessories,
         "subjects": sorted({r["subject"] for r in rows}),
         "thresholds": {"liveness_allow": lc["allow"], "liveness_deny": lc["deny"],
                        "identity_match": ic["match"], "identity_borderline": ic["borderline"],

@@ -132,10 +132,15 @@ def moire_score(frames: list[Frame]) -> tuple[float | None, dict]:
 def glare_score(frames: list[Frame]) -> tuple[float | None, dict]:
     c = CFG["glare"]
     fracs = []
+    from .occlusion import lens_mask
     for f in frames:
         crop = face_crop(f.img, f.box)
         if crop.size:
-            fracs.append(float(np.mean(np.all(crop >= 250, axis=2))))
+            sat = np.all(crop >= 250, axis=2)
+            m = lens_mask(f, f.box, sat.shape)  # ignore glasses lenses: reflections there are normal
+            if m is not None and m.any():
+                sat = sat[m]
+            fracs.append(float(np.mean(sat)))
     if not fracs:
         return None, {}
     frac = float(np.median(fracs))
