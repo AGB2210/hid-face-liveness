@@ -8,9 +8,9 @@ import time
 
 import numpy as np
 
-from pipeline.config import ROOT
+from pipeline.config import DATA
 
-DB_PATH = ROOT / "data" / "hid.db"
+DB_PATH = DATA / "hid.db"
 _lock = threading.Lock()
 
 

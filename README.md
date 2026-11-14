@@ -32,6 +32,22 @@ Open http://localhost:8000 in Chrome or Edge, which need camera access.
 | `/enroll.html` | Enroll a person (2 s capture, 5 ArcFace templates) |
 | `/` | Kiosk: press Start or Space; "Show details" shows every signal |
 | `/record.html` | Record labelled test clips (live / print / screen / video / mask) for the evaluation |
+| `/report.html` | Results: press **Run evaluation** to replay every clip and compute the metrics |
+
+## Evaluation
+
+1. Enroll each tester.
+2. On `/record.html`, record ~6+ clips per label per person. For attacks, set **Subject** to the person shown in the photo, screen or mask.
+3. Press **Run evaluation** on `/report.html`, or run `.venv/Scripts/python eval/run_eval.py`.
+
+The report shows:
+- **Headline metrics:** liveness detection accuracy, face authentication accuracy, FAR, FRR and decision time.
+- **Per attack type:** APCER, BPCER and ACER (ISO/IEC 30107-3).
+- **Decision breakdown:** what the system decided for each scenario, plus a latency histogram.
+- **Ablation:** how well each check separates live from attack on its own (AUC).
+- **Threshold sweeps:** for calibrating `backend/config.yaml`.
+
+Every rate includes a 95% confidence interval, because the test set is small.
 
 ## Pipeline
 

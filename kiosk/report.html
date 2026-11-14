@@ -1,6 +1,168 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>HID Liveness Results</title><link rel="stylesheet" href="styles.css" /></head>
-<body><header><span class="logo">HID</span><h1>Results</h1>
-<nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/record.html">Record test clips</a><a href="/report.html" class="active">Results</a></nav></header>
-<main><div class="card">No evaluation report yet. Record clips, then run <code>python eval/run_eval.py</code>.</div></main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Liveness Results</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+    .tile { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: 12px; padding: 14px 16px; }
+    .tile .v { font-size: 32px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .tile .l { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .tile .s { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .tile.good { border-left-color: var(--allow); }
+    .tile.warn { border-left-color: var(--verify); }
+    .tile.bad { border-left-color: var(--deny); }
+    section.card { margin-top: 18px; overflow-x: auto; }
+    .stackbar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; min-width: 140px; background: var(--line); }
+    .stackbar span { display: block; height: 100%; }
+    .cm td.n { text-align: center; font-weight: 700; }
+    tr.cur td { background: rgba(47,107,255,.15); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; font-size: 12px; color: var(--muted); }
+    .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    details summary { cursor: pointer; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Performance evaluation</h1>
+    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/record.html">Record test clips</a><a href="/report.html" class="active">Results</a></nav>
+  </header>
+  <main>
+    <div class="row" style="justify-content:space-between">
+      <div id="meta" class="muted small">Loading…</div>
+      <button id="run">Run evaluation</button>
+    </div>
+    <div id="body"></div>
+  </main>
+  <script type="module">
+    import { esc } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const COL = { ALLOW: "var(--allow)", REQUEST_VERIFICATION: "var(--verify)", DENY: "var(--deny)" };
+    const SHORT = { ALLOW: "Allow", REQUEST_VERIFICATION: "Verify", DENY: "Deny" };
+    const NAMES = { live: "Live person", print: "Printed photo", screen_photo: "Screen replay (photo)", video_replay: "Video replay", mask: "Mask" };
+    const CHECK = { minifas: "Anti-spoof CNN (MiniFASNet)", flatness: "3-D motion (flatness)", moire: "Screen pattern (moire)", glare: "Specular glare", fused: "Fused (all checks)" };
+
+    const p = (r, d = 1) => (r?.rate == null ? "n/a" : `${(100 * r.rate).toFixed(d)}%`);
+    const kn = (r) => (r?.n ? `${r.k}/${r.n} · 95% CI ${(100 * r.ci95[0]).toFixed(1)}–${(100 * r.ci95[1]).toFixed(1)}%` : "no data");
+    const f2 = (v) => (v == null ? "–" : Number(v).toFixed(2));
+
+    function tile(value, label, sub, cls = "") {
+      return `<div class="tile ${cls}"><div class="v">${value}</div><div class="l">${label}</div><div class="s">${sub}</div></div>`;
+    }
+    function stack(outcomes, n) {
+      return `<div class="stackbar">${["ALLOW", "REQUEST_VERIFICATION", "DENY"].map((d) =>
+        outcomes[d] ? `<span title="${SHORT[d]}: ${outcomes[d]}" style="width:${(100 * outcomes[d]) / n}%;background:${COL[d]}"></span>` : "").join("")}</div>`;
+    }
+    function histogram(t) {
+      const W = 640, H = 170, pad = 28, bins = t.histogram, max = Math.max(1, ...bins), bw = (W - pad * 2) / bins.length;
+      const x2s = pad + ((2000 - t.bins_ms[0]) / 100) * bw;
+      const bars = bins.map((c, i) => {
+        const h = ((H - pad * 2) * c) / max, x = pad + i * bw, y = H - pad - h;
+        const over = t.bins_ms[i] >= 2000;
+        return `<rect x="${x + 2}" y="${y}" width="${bw - 4}" height="${h}" rx="2" fill="${over ? "var(--deny)" : "var(--brand)"}"><title>${t.bins_ms[i]}–${t.bins_ms[i] + 100} ms: ${c}</title></rect>` +
+          (c ? `<text x="${x + bw / 2}" y="${y - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">${c}</text>` : "");
+      }).join("");
+      const ticks = t.bins_ms.filter((_, i) => i % 2 === 0).map((ms) => {
+        const x = pad + ((ms - t.bins_ms[0]) / 100) * bw;
+        return `<text x="${x}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${(ms / 1000).toFixed(1)}s</text>`;
+      }).join("");
+      return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px">${bars}${ticks}
+        <line x1="${x2s}" x2="${x2s}" y1="${pad - 10}" y2="${H - pad}" stroke="var(--deny)" stroke-dasharray="4 3"/>
+        <text x="${x2s + 4}" y="${pad - 2}" font-size="11" fill="var(--deny)">2 s limit</text></svg>`;
+    }
+
+    function render(r) {
+      const h = r.headline, t = r.timing;
+      $("meta").innerHTML = `Generated ${esc(r.generated)} · ${r.clips.length} clips · ${r.subjects.length} subjects · ` +
+        Object.entries(r.counts).filter(([, n]) => n).map(([l, n]) => `${esc(NAMES[l])} ${n}`).join(" · ");
+      const cls = (rate, good, ok, higherBetter = true) => rate == null ? "" :
+        (higherBetter ? (rate >= good ? "good" : rate >= ok ? "warn" : "bad") : (rate <= good ? "good" : rate <= ok ? "warn" : "bad"));
+
+      let html = `<section class="card"><h2>Headline</h2><div class="tiles">
+        ${tile(p(h.liveness_accuracy), "Liveness detection accuracy", kn(h.liveness_accuracy), cls(h.liveness_accuracy.rate, .95, .85))}
+        ${tile(p(h.face_auth_accuracy), "Face authentication accuracy", kn(h.face_auth_accuracy), cls(h.face_auth_accuracy.rate, .98, .9))}
+        ${tile(p(h.far), "False acceptance rate (FAR)", kn(h.far), cls(h.far.rate, .01, .05, false))}
+        ${tile(p(h.frr), "False rejection rate (FRR)", kn(h.frr), cls(h.frr.rate, .05, .15, false))}
+        ${tile(t.total_p95 == null ? "n/a" : (t.total_p95 / 1000).toFixed(2) + " s", "Decision time (95th pct)", `median ${(t.total_p50 / 1000).toFixed(2)} s · max ${(t.total_max / 1000).toFixed(2)} s · ${p(t.under_2s, 0)} under 2 s`, t.total_max < 2000 ? "good" : "bad")}
+        ${tile(p(h.attacks_allowed), "Attacks that got ALLOW", kn(h.attacks_allowed), cls(h.attacks_allowed.rate, 0, .05, false))}
+      </div><p class="small muted">Small test set: 95% confidence intervals are shown so the numbers are not over-claimed.
+      Thresholds: liveness allow ≥ ${r.thresholds.liveness_allow}, deny &lt; ${r.thresholds.liveness_deny}; identity match ≥ ${r.thresholds.identity_match}.</p></section>`;
+
+      html += `<section class="card"><h2>Per attack type (ISO/IEC 30107-3)</h2>
+        <p class="small muted">APCER = share of attacks wrongly accepted. "System" counts attacks that reached ALLOW; "liveness" counts attacks the liveness score alone called live.
+        BPCER = share of live people wrongly rejected as a spoof: <b>${p(r.bpcer)}</b> (${kn(r.bpcer)}).</p>
+        <table><tr><th>Attack</th><th>Clips</th><th>APCER (system)</th><th>APCER (liveness)</th><th>ACER</th><th>Outcomes</th><th>Most common reason</th></tr>
+        ${Object.entries(r.per_attack).map(([a, x]) => `<tr><td>${esc(x.name)}</td><td>${x.clips}</td>
+          <td><b>${p(x.apcer_system)}</b> <span class="muted small">${x.apcer_system.k}/${x.apcer_system.n}</span></td>
+          <td>${p(x.apcer_liveness)} <span class="muted small">${x.apcer_liveness.k}/${x.apcer_liveness.n}</span></td>
+          <td>${x.acer == null ? "–" : (100 * x.acer).toFixed(1) + "%"}</td>
+          <td>${stack(x.outcomes, x.clips)}</td><td class="small muted">${esc(x.top_reasons[0]?.[0] || "")}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No attack clips yet</td></tr>'}
+        </table>
+        <div class="legend" style="margin-top:8px"><span><i style="background:var(--allow)"></i>Allow</span><span><i style="background:var(--verify)"></i>Request verification</span><span><i style="background:var(--deny)"></i>Deny</span></div></section>`;
+
+      const labels = Object.keys(r.confusion);
+      html += `<section class="card"><h2>Decisions by scenario</h2><table class="cm"><tr><th>Scenario</th>${["ALLOW", "REQUEST_VERIFICATION", "DENY"].map((d) => `<th style="text-align:center">${SHORT[d]}</th>`).join("")}</tr>
+        ${labels.map((l) => {
+          const row = r.confusion[l], n = Object.values(row).reduce((a, b) => a + b, 0);
+          return `<tr><td>${esc(NAMES[l])}</td>${["ALLOW", "REQUEST_VERIFICATION", "DENY"].map((d) => {
+            const v = row[d], good = (l === "live") === (d === "ALLOW") || d === "REQUEST_VERIFICATION";
+            const a = n ? v / n : 0;
+            return `<td class="n" style="background:${v ? (good ? `rgba(31,191,99,${0.12 + a * 0.5})` : `rgba(229,72,77,${0.12 + a * 0.5})`) : "transparent"}">${v}</td>`;
+          }).join("")}</tr>`;
+        }).join("")}</table>
+        <p class="small muted">Live people: ${r.live_outcomes.ALLOW} allowed straight away, ${r.live_outcomes.REQUEST_VERIFICATION} asked for an extra check, ${r.live_outcomes.DENY} denied.</p></section>`;
+
+      html += `<section class="card"><h2>Decision time (capture + processing)</h2>${histogram(t)}
+        <p class="small muted">Processing only: median ${t.processing_p50} ms, 95th pct ${t.processing_p95} ms. Capture burst ≈ 1.0 s. Measured on a laptop CPU, no GPU.</p></section>`;
+
+      html += `<section class="card"><h2>Which checks do the work (ablation)</h2>
+        <p class="small muted">AUC = chance that a random live clip scores higher than a random attack clip (1.00 perfect, 0.50 useless). Coverage = share of clips where the check could give an answer.</p>
+        <table><tr><th>Check</th><th>AUC (all attacks)</th>${Object.keys(r.per_attack).map((a) => `<th>${esc(NAMES[a])}</th>`).join("")}<th>Coverage</th><th>Median live / attack</th></tr>
+        ${Object.entries(r.ablation).map(([c, x]) => `<tr${c === "fused" ? ' class="cur"' : ""}><td>${esc(CHECK[c])}</td><td><b>${f2(x.auc_all)}</b></td>
+          ${Object.keys(r.per_attack).map((a) => `<td>${f2(x.auc_per_attack[a])}</td>`).join("")}
+          <td>${Math.round(100 * x.coverage)}%</td><td>${f2(x.live_median)} / ${f2(x.attack_median)}</td></tr>`).join("")}</table></section>`;
+
+      html += `<section class="card"><h2>Calibration</h2><div class="grid" style="grid-template-columns:1fr 1fr">
+        <div><h2 style="font-size:12px">Liveness threshold (allow)</h2><table><tr><th>Threshold</th><th>APCER</th><th>BPCER</th></tr>
+        ${r.sweep.map((s) => `<tr${Math.abs(s.threshold - r.thresholds.liveness_allow) < 0.026 ? ' class="cur"' : ""}><td>${s.threshold.toFixed(2)}</td><td>${s.apcer == null ? "–" : (100 * s.apcer).toFixed(1) + "%"}</td><td>${s.bpcer == null ? "–" : (100 * s.bpcer).toFixed(1) + "%"}</td></tr>`).join("")}</table></div>
+        <div><h2 style="font-size:12px">Identity threshold (match)</h2><table><tr><th>Threshold</th><th>FAR</th><th>FRR</th></tr>
+        ${r.id_sweep.map((s) => `<tr${Math.abs(s.threshold - r.thresholds.identity_match) < 0.026 ? ' class="cur"' : ""}><td>${s.threshold.toFixed(2)}</td><td>${s.far == null ? "–" : (100 * s.far).toFixed(1) + "%"}</td><td>${s.frr == null ? "–" : (100 * s.frr).toFixed(1) + "%"}</td></tr>`).join("")}</table></div>
+        </div><p class="small muted">Highlighted row = current setting in backend/config.yaml. Vetoes still apply at every threshold.</p></section>`;
+
+      html += `<section class="card"><details><summary>All ${r.clips.length} clips</summary><table style="margin-top:10px">
+        <tr><th>Label</th><th>Subject</th><th>Decision</th><th>Liveness</th>${["minifas", "flatness", "moire", "glare"].map((c) => `<th>${c}</th>`).join("")}<th>Match</th><th>ms</th><th>Reason</th></tr>
+        ${r.clips.map((c) => `<tr><td>${esc(NAMES[c.label])}</td><td>${esc(c.subject)}</td><td><span class="pill ${c.decision}">${SHORT[c.decision]}</span></td>
+          <td>${f2(c.liveness)}</td>${["minifas", "flatness", "moire", "glare"].map((k) => `<td>${f2(c.checks[k])}</td>`).join("")}
+          <td>${f2(c.genuine_sim)}</td><td>${Math.round(c.processing_ms)}</td><td class="small muted">${esc(c.reasons.join("; "))} ${esc(c.note)}</td></tr>`).join("")}
+        </table></details></section>`;
+      $("body").innerHTML = html;
+    }
+
+    async function load() {
+      const res = await fetch("/api/report");
+      if (res.status === 404) {
+        $("meta").textContent = "No evaluation yet - record clips, then press Run evaluation.";
+        return;
+      }
+      render(await res.json());
+    }
+    $("run").addEventListener("click", async () => {
+      $("run").disabled = true;
+      $("run").textContent = "Running… (~0.4 s per clip)";
+      try {
+        const res = await fetch("/api/eval/run", { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        render(await res.json());
+      } catch (e) {
+        $("meta").textContent = `Evaluation failed: ${e.message}`;
+      } finally {
+        $("run").disabled = false;
+        $("run").textContent = "Run evaluation";
+      }
+    });
+    load();
+  </script>
+</body>
+</html>

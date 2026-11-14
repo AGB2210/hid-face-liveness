@@ -129,5 +129,17 @@ def get_models():
     return {"yunet": YuNet(), "landmarker": Landmarker(), "arcface": ArcFace(), "minifas": MiniFAS()}
 
 
+def warmup() -> None:
+    """Run every model once so the first real user doesn't pay the ~0.5 s init cost."""
+    m = get_models()
+    img = np.full((720, 960, 3), 128, np.uint8)
+    cv2.circle(img, (480, 330), 140, (150, 170, 200), -1)
+    with _LOCK:
+        m["yunet"](img)
+        m["landmarker"](np.ascontiguousarray(img[150:520, 300:660]))
+        m["arcface"].embed([np.zeros((112, 112, 3), np.uint8)])
+        m["minifas"].real_prob(img, (380, 230, 200, 200))
+
+
 def models_lock() -> threading.Lock:
     return _LOCK

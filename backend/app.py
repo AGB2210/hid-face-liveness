@@ -19,20 +19,20 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 import sessions  # noqa: E402
 import store  # noqa: E402
 from pipeline import engine  # noqa: E402
-from pipeline.config import CFG, ROOT, reload_config  # noqa: E402
+from pipeline.config import CFG, DATA, ROOT, reload_config  # noqa: E402
 from pipeline.frames import analyse_frame, decode  # noqa: E402
 from pipeline.identity import get_provider  # noqa: E402
-from pipeline.models import get_models, models_lock  # noqa: E402
+from pipeline.models import models_lock, warmup  # noqa: E402
 
 LABELS = ["live", "print", "screen_photo", "video_replay", "mask"]
-CLIPS = ROOT / "data" / "clips"
+CLIPS = DATA / "clips"
 
 app = FastAPI(title="HID Liveness Kiosk")
 
 
 @app.on_event("startup")
 def _warm() -> None:
-    get_models()  # load models once so the first user isn't slow
+    warmup()  # load and run every model once so the first user isn't slow
 
 
 async def _read(frames: list[UploadFile]) -> list[bytes]:
@@ -172,7 +172,23 @@ async def record(label: str = Form(...), subject: str = Form(...), capture_ms: f
         {"label": label, "subject": subject, "capture_ms": capture_ms, "note": note,
          "frames": len(jpegs), "created": time.time()}, indent=2))
     res = engine.analyse(jpegs, None, None)
-    return {"saved": str(clip.relative_to(ROOT)), "result": res, "counts": _clip_counts()}
+    return {"saved": str(clip.relative_to(DATA.parent)), "result": res, "counts": _clip_counts()}
+
+
+@app.get("/api/report")
+def report() -> dict:
+    import evaluation
+    res = evaluation.load_results()
+    if res is None:
+        raise HTTPException(404, "No evaluation yet")
+    return res
+
+
+@app.post("/api/eval/run")
+def eval_run() -> dict:
+    """Replays every recorded clip (takes ~0.4 s per clip; the kiosk waits meanwhile)."""
+    import evaluation
+    return evaluation.evaluate()
 
 
 app.mount("/", StaticFiles(directory=ROOT / "kiosk", html=True), name="kiosk")
