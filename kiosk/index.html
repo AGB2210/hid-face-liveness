@@ -28,7 +28,13 @@
       <div class="cam" id="cam">
         <video id="video" playsinline muted></video>
         <div class="guide"></div>
-        <div class="instruction" id="instruction"></div>
+        <div class="cue hidden" id="cue" role="alert" aria-live="assertive">
+          <div class="cue-icon" id="cueIcon"></div>
+          <div class="cue-eyebrow" id="cueEyebrow">Live check</div>
+          <div class="cue-count" id="cueCount"></div>
+          <div class="cue-text" id="cueText"></div>
+          <div class="cue-bar"><i id="cueBar"></i></div>
+        </div>
         <div class="banner" id="banner">Starting camera</div>
         <div class="progress" id="progress"></div>
       </div>

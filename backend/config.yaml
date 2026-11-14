@@ -9,8 +9,8 @@ capture:
   frames: 10            # frames per burst (kiosk reads this from /config)
   duration_ms: 1000     # burst length
   width: 960            # requested camera width
-  challenge_duration_ms: 1800
-  challenge_frames: 16
+  challenge_duration_ms: 3000   # time to do the cue (blink / head turn), after a 3-2-1 countdown
+  challenge_frames: 26          # ~9 fps, enough to catch a blink
   jpeg_quality: 0.92
 
 quality:

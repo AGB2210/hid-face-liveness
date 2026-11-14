@@ -5,6 +5,9 @@ Uses the credentials from aws-credentials.bat (run via deploy.bat) or any AWS pr
   python scripts/deploy_aws.py            deploy (or show the existing deployment)
   python scripts/deploy_aws.py status     health of the running deployment
   python scripts/deploy_aws.py update     ship the current code and restart (keeps data)
+  python scripts/deploy_aws.py update --relaunch
+                                          only if the server is broken: build a new one and
+                                          terminate the old one (enrolled people are lost)
   python scripts/deploy_aws.py destroy    remove everything this script created
   python scripts/deploy_aws.py edge       write edge.bat: makes this laptop an edge kiosk of the cloud server
 
@@ -143,7 +146,13 @@ curl -fsSL '{url}' -o /tmp/code.tar.gz
 tar xzf /tmp/code.tar.gz -C /opt/hid
 .venv/bin/pip install -q -r requirements.txt
 systemctl restart hid-kiosk
-echo updated
+# health check from inside the server, so it works whatever the deployer's IP is
+for i in $(seq 1 45); do
+  c=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 3 http://127.0.0.1:{port}/api/config || true)
+  if [ "$c" = "200" ] || [ "$c" = "401" ]; then echo APP_UP; exit 0; fi
+  sleep 2
+done
+echo APP_DOWN; journalctl -u hid-kiosk -n 20 --no-pager; exit 1
 """
 
 
@@ -388,29 +397,36 @@ def update() -> None:
     st = load_state()
     if not st.get("instance"):
         sys.exit("Nothing deployed yet - run without arguments first.")
+    relaunch = "--relaunch" in sys.argv
     st.setdefault("sync_key", secrets.token_urlsafe(24))
     save_state(st)
     urls = upload(st)
     log("new code uploaded")
-    if st.get("role_ok"):
-        try:
-            cmd = ssm.send_command(InstanceIds=[st["instance"]], DocumentName="AWS-RunShellScript",
-                                   Parameters={"commands": [UPDATE_SCRIPT.format(
-                                       url=urls["code"], sync_key=st.setdefault("sync_key", secrets.token_urlsafe(24)))]})["Command"]["CommandId"]
-            for _ in range(60):
-                time.sleep(5)
-                try:
-                    r = ssm.get_command_invocation(CommandId=cmd, InstanceId=st["instance"])
-                except ClientError:
-                    continue
-                if r["Status"] in ("Success", "Failed", "Cancelled", "TimedOut"):
-                    log(f"in-place update: {r['Status']} {r.get('StandardErrorContent', '')[-300:]}")
-                    break
-            if wait_app(st, 5):
-                return
-        except ClientError as e:
-            log(f"in-place update not possible ({code(e)}) - relaunching the server instead")
-    # Fallback: new instance, repoint CloudFront, terminate the old one (enrolled users are lost)
+    if not relaunch:
+        # In place only. Never replace the server on its own: that would delete everyone enrolled.
+        if not st.get("role_ok"):
+            sys.exit("In-place update needs the SSM instance role. Fix that, or (losing enrolled people) run: update --relaunch")
+        cmd = ssm.send_command(InstanceIds=[st["instance"]], DocumentName="AWS-RunShellScript",
+                               Parameters={"commands": [UPDATE_SCRIPT.format(
+                                   url=urls["code"], sync_key=st["sync_key"], port=PORT)]})["Command"]["CommandId"]
+        log(f"updating {st['instance']} in place (packages, restart, health check)...")
+        r = {"Status": "TimedOut"}
+        for _ in range(96):  # up to 8 minutes
+            time.sleep(5)
+            try:
+                r = ssm.get_command_invocation(CommandId=cmd, InstanceId=st["instance"])
+            except ClientError:
+                continue
+            if r["Status"] in ("Success", "Failed", "Cancelled", "TimedOut"):
+                break
+        out = r.get("StandardOutputContent", "")
+        if r["Status"] == "Success" and "APP_UP" in out:
+            log("in-place update done - app is up on the server")
+            return
+        log(f"in-place update {r['Status']}: {(out + r.get('StandardErrorContent', ''))[-600:]}")
+        sys.exit("The server was NOT replaced and its data is untouched. Fix the error above and run update again.")
+    # Explicit --relaunch only: new instance, repoint CloudFront, terminate the old one (enrolled users are lost)
+    log("--relaunch: building a new server; the old one and everyone enrolled on it will be deleted")
     old = st["instance"]
     launch(st, urls)
     st["dns"] = wait_running(st["instance"]); save_state(st)

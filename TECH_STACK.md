@@ -82,4 +82,4 @@ Data written before encryption was added is encrypted automatically at startup. 
 |---|---|
 | Local laptop (CPU) | ~1.35-1.40 s (1.0 s capture + ~0.35 s processing) |
 | Cloud from India via CloudFront (frame streaming) | ~1.40-1.65 s |
-| High-security / offline (with live cue) | ~3 s by design (extra friction only where risk is higher) |
+| High-security / offline (with live cue) | ~5.5 s by design: 2 s countdown + 3 s cue + processing (extra friction only where risk is higher) |

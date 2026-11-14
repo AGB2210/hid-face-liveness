@@ -3,7 +3,7 @@ import { createTracker, hint, track } from "./facetrack.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
-const decisionEl = $("decision"), startBtn = $("start"), instruction = $("instruction");
+const decisionEl = $("decision"), startBtn = $("start"), cueEl = $("cue");
 let cfg, busy = false, resetTimer = null, otpSession = null;
 let staff = false, lastStatus = null, latest = null, armed = true, alignedSince = null, absentSince = null, lastOcclusion = null;
 const CUE_LABEL = { blink: "Blink", turn_left: "Turn left", turn_right: "Turn right" };
@@ -19,6 +19,47 @@ const STATE = {
   REQUEST_VERIFICATION: { cls: "verify", word: "Step-up", note: "Step-up verification required" },
 };
 const VERDICT = { inside: "Within window", grace: "Grace period", outside: "Outside window" };
+
+/* ---------------------------------------------------------------- live cue */
+const ICON = {
+  blink: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M4 24c5-8 12-12 20-12s15 4 20 12c-5 8-12 12-20 12S9 32 4 24z"/><circle cx="24" cy="24" r="6" fill="currentColor"/></svg>',
+  turn_left: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 24H10M22 11 9 24l13 13"/></svg>',
+  turn_right: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 24h30M26 11l13 13-13 13"/></svg>',
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Show the cue big, count down 3-2-1, then capture while a bar shows the time left. */
+async function cueCapture(cue, why = "Live check") {
+  cueEl.className = `cue ready ${cue.action}`;
+  $("cueIcon").innerHTML = ICON[cue.action] || "";
+  $("cueEyebrow").textContent = `${why} · get ready`;
+  $("cueText").textContent = cue.instruction;
+  const bar = $("cueBar");
+  bar.style.transition = "none";
+  bar.style.transform = "scaleX(1)";
+  cam.classList.add("cueing");
+  banner.textContent = "";
+  for (const n of [3, 2, 1]) {
+    $("cueCount").textContent = n;
+    await sleep(700);
+  }
+  cueEl.className = `cue go ${cue.action}`;
+  $("cueEyebrow").textContent = `${why} · now`;
+  $("cueCount").textContent = "";
+  void bar.offsetWidth;  // restart the bar animation
+  bar.style.transition = `transform ${cue.duration_ms}ms linear`;
+  bar.style.transform = "scaleX(0)";
+  try {
+    return await burst(cue.frames, cue.duration_ms);
+  } finally {
+    hideCue();
+  }
+}
+
+function hideCue() {
+  cueEl.className = "cue hidden";
+  cam.classList.remove("cueing");
+}
 
 function setCamState(state) {
   cam.classList.remove("capturing", "allow", "deny", "verify");
@@ -102,7 +143,7 @@ function idle(msg = "Look at the camera and press Start.") {
   decisionEl.innerHTML = `<div class="eyebrow">Decision</div><div class="big">Ready</div><p class="why">${esc(msg)}</p>`;
   banner.textContent = "Align your face within the frame";
   setCamState(null);
-  instruction.style.display = "none";
+  hideCue();
   $("otpCard").classList.add("hidden");
   otpSession = null;
 }
@@ -142,16 +183,11 @@ async function runCheck() {
     if (zoneSec === "high" || lastStatus?.mode === "offline") {
       // eyes hidden last time (sunglasses)? ask for a head turn instead of a blink
       cue = await postForm("/api/cue", framesForm([], { zone: context().zone, avoid: lastOcclusion?.sunglasses ? "blink" : "" }));
-      instruction.textContent = `Get ready: ${cue.instruction}`;
-      instruction.style.display = "block";
-      await new Promise((r) => setTimeout(r, 900));
-      instruction.textContent = `${cue.instruction} now`;
-      banner.textContent = cue.instruction;
     } else {
       banner.textContent = "Hold still";
     }
-    const shot = cue ? await burst(cue.frames, cue.duration_ms) : await burst(cfg.capture.frames, cfg.capture.duration_ms);
-    instruction.style.display = "none";
+    const why = lastStatus?.mode === "offline" ? "Offline check" : "High-security check";
+    const shot = cue ? await cueCapture(cue, why) : await burst(cfg.capture.frames, cfg.capture.duration_ms);
     banner.textContent = "Analysing";
     const t0 = performance.now() - shot.captureMs;
     const res = await postForm("/api/verify", framesForm([shot.lastBlob], {
@@ -179,13 +215,7 @@ async function handleNext(res) {
   }
   if (res.challenge_request) {
     const ch = res.challenge_request;
-    banner.textContent = "Extra check needed";
-    instruction.textContent = ch.instruction;
-    instruction.style.display = "block";
-    await new Promise((r) => setTimeout(r, 900)); // time to read the instruction
-    banner.textContent = ch.instruction;
-    const shot = await burst(ch.frames, ch.duration_ms);
-    instruction.style.display = "none";
+    const shot = await cueCapture(ch, "Extra check");
     banner.textContent = "Analysing";
     const t0 = performance.now() - shot.captureMs;
     const res2 = await postForm("/api/verify", framesForm([shot.lastBlob], {
