@@ -23,9 +23,18 @@ quality:
   min_good_frames: 4        # frames that must pass quality
 
 identity:
-  provider: local_arcface   # local_arcface | rekognition
-  match: 0.42               # cosine >= match -> identity match
-  borderline: 0.30          # borderline <= cosine < match -> ask for more verification
+  # local_arcface | rekognition   (env var HID_IDENTITY overrides this)
+  provider: local_arcface
+  # score >= match -> identity match; borderline <= score < match -> ask for more verification
+  local_arcface:
+    match: 0.42             # ArcFace cosine similarity
+    borderline: 0.30
+  rekognition:
+    match: 0.90             # Rekognition similarity / 100
+    borderline: 0.75
+    region: us-east-1
+    collection_id: hid-kiosk-faces
+    enroll_faces: 3         # face crops indexed per user
 
 liveness:
   weights:

@@ -88,7 +88,8 @@ export function renderDebug(res) {
   }
   if (res.identity) {
     const id = res.identity;
-    rows.push(`<tr><td><b>Identity (${esc(id.mode)})</b></td><td>${bar(id.similarity)}</td><td class="muted small">${esc(id.name || "no match")} ${esc(JSON.stringify(id.scores || {}))}</td></tr>`);
+    const via = id.api_ms !== undefined ? ` · Rekognition ${id.api_ms} ms` : "";
+    rows.push(`<tr><td><b>Identity (${esc(id.mode)})</b></td><td>${bar(id.similarity)}</td><td class="muted small">${esc(id.error || id.name || "no match")}${esc(via)} ${esc(JSON.stringify(id.scores || {}))}</td></tr>`);
   }
   if (res.challenge) {
     rows.push(`<tr><td>Challenge: ${esc(res.challenge.action)}</td><td>${res.challenge.passed ? "passed" : "failed"}</td><td class="muted small">${esc(JSON.stringify(res.challenge))}</td></tr>`);

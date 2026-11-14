@@ -34,6 +34,24 @@ Open http://localhost:8000 in Chrome or Edge, which need camera access.
 | `/record.html` | Record labelled test clips (live / print / screen / video / mask) for the evaluation |
 | `/report.html` | Results: press **Run evaluation** to replay every clip and compute the metrics |
 
+## Amazon Rekognition (cloud identity)
+
+Face matching can use Amazon Rekognition instead of the local ArcFace model. Liveness always runs locally.
+
+1. Copy `aws-credentials.example.bat` to `aws-credentials.bat`. It is git-ignored, so it never gets committed.
+2. Get the values from the Workshop Studio event page: **Get AWS CLI credentials**, then the **Windows** tab. They expire after a few hours, so paste fresh ones when Rekognition stops working.
+3. Run `start.bat`. It loads the credentials, sets `HID_IDENTITY=rekognition` and checks access.
+4. Push people who are already enrolled into the collection, so they don't need to re-enroll:
+   ```bash
+   .venv/Scripts/python scripts/sync_rekognition.py
+   ```
+
+How it works:
+- **Collection:** `hid-kiosk-faces` in `us-east-1`. Each person has 3 indexed faces.
+- **Matching:** the best frame is cropped and searched with `SearchFacesByImage`. That call runs in parallel with the liveness checks, so it adds little to the decision time.
+- **Thresholds:** `identity.rekognition` in `backend/config.yaml`, with match ≥ 0.90 and borderline ≥ 0.75.
+- **If AWS is unreachable,** the kiosk answers REQUEST VERIFICATION ("identity service unavailable") instead of crashing.
+
 ## Evaluation
 
 1. Enroll each tester.

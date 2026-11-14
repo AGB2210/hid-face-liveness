@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from . import liveness as lv
 from .config import CFG
 from .frames import ISSUE_TEXT, Frame, analyse_frame, decode
-from .identity import get_provider
+from .identity import get_provider, identity_thresholds
 from .models import models_lock
 
 ALLOW, VERIFY, DENY = "ALLOW", "REQUEST_VERIFICATION", "DENY"
@@ -17,6 +18,17 @@ ALLOW, VERIFY, DENY = "ALLOW", "REQUEST_VERIFICATION", "DENY"
 
 def _ramp(x, lo, hi):
     return float(np.clip((x - lo) / (hi - lo), 0, 1))
+
+
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="identity")
+
+
+def _safe_identify(provider, frames, claimed_id) -> dict:
+    try:
+        return provider.identify(frames, claimed_id)
+    except Exception as e:  # network / credentials / service errors must not crash the kiosk
+        return {"user_id": None, "name": None, "similarity": 0.0, "scores": {},
+                "mode": "1:1" if claimed_id else "1:N", "error": f"{type(e).__name__}: {e}"[:300]}
 
 
 def fuse(live: dict, extra_bonus: float = 0.0) -> tuple[float, list[str]]:
@@ -85,10 +97,16 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
             return _finish(result, t0, t_dec, t_frames, t_frames, t_frames)
 
         top = sorted(good or face_frames, key=lambda f: f.rank, reverse=True)[:3]
+        provider = get_provider()
+        # A remote provider (Rekognition) is a network call: run it while liveness computes.
+        fut = _POOL.submit(_safe_identify, provider, top, claimed_id) if provider.remote else None
         live = lv.run_all(face_frames, top)
         t_live = time.perf_counter()
-        ident = get_provider().identify(top, claimed_id)
-        t_id = time.perf_counter()
+        if fut is None:
+            ident = _safe_identify(provider, top, claimed_id)
+    if fut is not None:
+        ident = fut.result()
+    t_id = time.perf_counter()
 
     action_ok = None
     if challenge:
@@ -100,9 +118,9 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
     result["liveness"] = {"score": round(fused, 3), "checks": live, "vetoes": vetoes}
     result["identity"] = ident
 
-    ic = CFG["identity"]
+    ic = identity_thresholds()
     sim = ident["similarity"] if ident["user_id"] else 0.0
-    id_conf = _ramp(sim, 0.2, 0.6)
+    id_conf = _ramp(sim, ic["borderline"] - 0.1, min(1.0, ic["match"] + 0.08))
     lc = CFG["liveness"]
     worst_issue = issue_counts.most_common(1)[0][0] if issue_counts else None
 
@@ -112,6 +130,8 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
         d = _decision(DENY, vetoes, max(0.9, 1 - fused))
     elif fused < lc["deny"]:
         d = _decision(DENY, ["Liveness check failed - possible spoof"], 1 - fused)
+    elif ident.get("error"):
+        d = _decision(VERIFY, ["Identity service unavailable - please try again"], 0.0, next_step="recapture")
     elif not ident["user_id"] or sim < ic["borderline"]:
         d = _decision(DENY, ["Identity not recognised"], 1 - id_conf)
     elif challenge and challenge.get("candidate") and ident["user_id"] != challenge["candidate"]:

@@ -19,6 +19,7 @@ import numpy as np
 
 from pipeline import engine
 from pipeline.config import CFG, DATA
+from pipeline.identity import identity_thresholds
 
 ATTACKS = ["print", "screen_photo", "video_replay", "mask"]
 LABEL_NAMES = {"live": "Live person", "print": "Printed photo", "screen_photo": "Screen replay (photo)",
@@ -89,7 +90,7 @@ def liveness_reject(r: dict, deny: float) -> bool:
 
 
 def summarise(rows: list[dict]) -> dict:
-    lc, ic = CFG["liveness"], CFG["identity"]
+    lc, ic = CFG["liveness"], identity_thresholds()
     live = [r for r in rows if r["label"] == "live"]
     attacks = [r for r in rows if r["label"] in ATTACKS]
 
@@ -165,7 +166,8 @@ def summarise(rows: list[dict]) -> dict:
                       "apcer": rate(sum(liveness_pass(r, t) for r in attacks), len(attacks))["rate"],
                       "bpcer": rate(sum(not liveness_pass(r, t) for r in live), len(live))["rate"]})
     id_sweep = []
-    for t in np.round(np.arange(0.20, 0.71, 0.05), 2):
+    lo, hi = max(0.0, ic["match"] - 0.25), min(1.0, ic["match"] + 0.25)
+    for t in np.round(np.arange(lo, hi + 1e-6, 0.05), 2):
         id_sweep.append({"threshold": float(t),
                          "far": (sum(s >= t for s in imp) / len(imp)) if imp else None,
                          "frr": (sum(s < t for s in gen) / len(gen)) if gen else None})
@@ -175,7 +177,8 @@ def summarise(rows: list[dict]) -> dict:
         "counts": {l: sum(r["label"] == l for r in rows) for l in ["live"] + ATTACKS},
         "subjects": sorted({r["subject"] for r in rows}),
         "thresholds": {"liveness_allow": lc["allow"], "liveness_deny": lc["deny"],
-                       "identity_match": ic["match"], "identity_borderline": ic["borderline"]},
+                       "identity_match": ic["match"], "identity_borderline": ic["borderline"],
+                       "identity_provider": ic["provider"]},
         "headline": {
             "liveness_accuracy": liveness_acc,
             "face_auth_accuracy": face_acc,

@@ -54,6 +54,16 @@ echo [setup] Exporting MiniFASNet to ONNX...
 "%PY%" scripts\export_minifas_onnx.py || goto :fail
 :have_onnx
 
+rem ---------- 4b. AWS credentials for Rekognition (optional, never committed) ----------
+if exist "aws-credentials.bat" (
+  call "aws-credentials.bat"
+  echo [aws] Credentials loaded from aws-credentials.bat
+)
+if defined HID_IDENTITY echo [identity] Provider: %HID_IDENTITY%
+if /i "%HID_IDENTITY%"=="rekognition" (
+  "%PY%" scripts\sync_rekognition.py --check || echo [warn] Rekognition not reachable - identity checks will fail until credentials are fixed.
+)
+
 rem ---------- 5. Port check ----------
 netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul
 if not errorlevel 1 (

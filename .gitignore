@@ -17,3 +17,7 @@ data/
 # Not code
 *.jpg
 !kiosk/**/*.jpg
+
+# Secrets
+aws-credentials.bat
+.env

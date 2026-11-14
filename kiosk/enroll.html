@@ -45,7 +45,7 @@
     async function loadUsers() {
       const users = await (await fetch("/api/users")).json();
       $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Templates</th><th></th></tr>" + (users.length
-        ? users.map((u) => `<tr><td>${esc(u.id)}</td><td>${esc(u.name)}</td><td>${u.n}</td><td><button class="secondary" data-del="${esc(u.id)}">Remove</button></td></tr>`).join("")
+        ? users.map((u) => `<tr><td>${esc(u.id)}</td><td>${esc(u.name)}</td><td>${u.n} local${u.n_rekognition ? ` · ${u.n_rekognition} Rekognition` : ""}</td><td><button class="secondary" data-del="${esc(u.id)}">Remove</button></td></tr>`).join("")
         : '<tr><td colspan="4" class="muted">Nobody enrolled yet</td></tr>');
     }
     $("users").addEventListener("click", async (e) => {

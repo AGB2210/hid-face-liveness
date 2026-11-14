@@ -21,7 +21,7 @@ import store  # noqa: E402
 from pipeline import engine  # noqa: E402
 from pipeline.config import CFG, DATA, ROOT, reload_config  # noqa: E402
 from pipeline.frames import analyse_frame, decode  # noqa: E402
-from pipeline.identity import get_provider  # noqa: E402
+from pipeline.identity import get_provider, provider_name  # noqa: E402
 from pipeline.models import models_lock, warmup  # noqa: E402
 
 LABELS = ["live", "print", "screen_photo", "video_replay", "mask"]
@@ -44,7 +44,7 @@ async def _read(frames: list[UploadFile]) -> list[bytes]:
 @app.get("/api/config")
 def config() -> dict:
     return {"capture": CFG["capture"], "labels": LABELS, "actions": sessions.ACTIONS,
-            "identity_provider": CFG["identity"]["provider"]}
+            "identity_provider": provider_name()}
 
 
 @app.post("/api/config/reload")
@@ -60,7 +60,7 @@ def users() -> list[dict]:
 
 @app.delete("/api/users/{user_id}")
 def delete_user(user_id: str) -> dict:
-    store.delete_user(user_id)
+    get_provider().delete(user_id)
     return {"ok": True}
 
 
@@ -76,8 +76,13 @@ async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = F
         if len(good) < 2:
             issues = sorted({i for f in fr for i in f.issues})
             raise HTTPException(422, f"Not enough good-quality frames ({len(good)}). Issues: {issues}")
-        n = get_provider().enroll(user_id, name, phone or None, good)
-    return {"ok": True, "user_id": user_id, "templates": n}
+        try:
+            n = get_provider().enroll(user_id, name, phone or None, good)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        except Exception as e:  # AWS credentials / network
+            raise HTTPException(502, f"Identity provider error: {type(e).__name__}: {e}"[:300])
+    return {"ok": True, "user_id": user_id, "templates": n, "provider": provider_name()}
 
 
 @app.post("/api/verify")

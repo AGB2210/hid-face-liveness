@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, emb BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS rek_faces (
+  face_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, collection TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, decision TEXT, stage TEXT,
   user_id TEXT, similarity REAL, liveness REAL, processing_ms REAL, total_ms REAL,
@@ -44,17 +46,44 @@ def upsert_user(user_id: str, name: str, phone: str | None, embs: np.ndarray) ->
         _db.commit()
 
 
+def upsert_user_meta(user_id: str, name: str, phone: str | None) -> None:
+    """Create/update a user without touching local templates (remote providers)."""
+    with _lock:
+        _db.execute("""INSERT INTO users VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE
+                       SET name=excluded.name, phone=excluded.phone""", (user_id, name, phone, time.time()))
+        _db.commit()
+
+
+def set_rek_faces(user_id: str, collection: str, face_ids: list[str]) -> None:
+    with _lock:
+        _db.execute("DELETE FROM rek_faces WHERE user_id=? AND collection=?", (user_id, collection))
+        _db.executemany("INSERT OR REPLACE INTO rek_faces VALUES (?,?,?)",
+                        [(fid, user_id, collection) for fid in face_ids])
+        _db.commit()
+
+
+def get_rek_faces(user_id: str, collection: str) -> list[str]:
+    return [r["face_id"] for r in _db.execute(
+        "SELECT face_id FROM rek_faces WHERE user_id=? AND collection=?", (user_id, collection))]
+
+
+def user_ids() -> list[str]:
+    return [r["id"] for r in _db.execute("SELECT id FROM users")]
+
+
 def delete_user(user_id: str) -> None:
     with _lock:
+        _db.execute("DELETE FROM rek_faces WHERE user_id=?", (user_id,))
         _db.execute("DELETE FROM templates WHERE user_id=?", (user_id,))
         _db.execute("DELETE FROM users WHERE id=?", (user_id,))
         _db.commit()
 
 
 def list_users() -> list[dict]:
-    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.created, COUNT(t.id) n
-                          FROM users u LEFT JOIN templates t ON t.user_id=u.id
-                          GROUP BY u.id ORDER BY u.created""").fetchall()
+    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.created,
+                            (SELECT COUNT(*) FROM templates t WHERE t.user_id=u.id) n,
+                            (SELECT COUNT(*) FROM rek_faces r WHERE r.user_id=u.id) n_rekognition
+                          FROM users u ORDER BY u.created""").fetchall()
     return [dict(r) for r in rows]
 
 
