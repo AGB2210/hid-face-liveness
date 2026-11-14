@@ -1,9 +1,9 @@
-import { captureStreamed, esc, framesForm, getConfig, kioskNav, postForm, renderDebug, startCamera } from "./common.js";
+import { captureStreamed, cuePanel, cueSeen, esc, framesForm, getConfig, kioskNav, postForm, renderDebug, startCamera } from "./common.js";
 import { createTracker, hint, track } from "./facetrack.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
-const decisionEl = $("decision"), startBtn = $("start"), cueEl = $("cue");
+const decisionEl = $("decision"), startBtn = $("start");
 let cfg, busy = false, resetTimer = null, otpSession = null;
 let staff = false, lastStatus = null, latest = null, armed = true, alignedSince = null, absentSince = null, lastOcclusion = null;
 const CUE_LABEL = { blink: "Blink", turn_left: "Turn left", turn_right: "Turn right" };
@@ -21,82 +21,31 @@ const STATE = {
 const VERDICT = { inside: "Within window", grace: "Grace period", outside: "Outside window" };
 
 /* ---------------------------------------------------------------- live cue */
-const ICON = {
-  glasses: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="28" r="8"/><circle cx="35" cy="28" r="8"/><path d="M21 27c2-2 4-2 6 0M5 26 3 18M43 26l2-8"/><path d="M8 40 40 12" stroke-width="3"/></svg>',
-  blink: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M4 24c5-8 12-12 20-12s15 4 20 12c-5 8-12 12-20 12S9 32 4 24z"/><circle cx="24" cy="24" r="6" fill="currentColor"/></svg>',
-  turn_left: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 24H10M22 11 9 24l13 13"/></svg>',
-  turn_right: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 24h30M26 11l13 13-13 13"/></svg>',
-};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Has the person done the cue? Read from this device's own face tracker, so the capture can
- *  end the moment it happens. A little stricter than the server, which checks the frames again. */
-function cueSeen(cue, startYaw, state) {
-  const s = latest;
-  if (!s?.present) return false;
-  if (cue.action === "blink") {
-    if (s.blink < 0.25) state.open = true;            // eyes seen open first...
-    return state.open && s.blink >= 0.5;               // ...then closed
-  }
-  if (s.yaw == null) return false;
-  const sign = cue.action === "turn_left" ? 1 : -1;    // yaw > 0 = turned to their own left
-  if (startYaw == null) return false;
-  const moved = sign * (s.yaw - startYaw);
-  return moved >= 18 || (sign * s.yaw >= 18 && moved >= 8);  // same idea as the server: turned AND moved
-}
+const panel = cuePanel(cam);  // shared with the console's face sign-in
 
 /** Show the cue big and start at once. Up to duration_ms (5 s), with a seconds-left counter;
  *  the capture ends as soon as the action is seen. */
 async function cueCapture(cue, why = "Live check") {
-  cueEl.className = `cue go ${cue.action}`;
-  $("cueIcon").innerHTML = ICON[cue.action] || "";
-  $("cueEyebrow").textContent = `${why} · now`;
-  $("cueText").textContent = cue.instruction;
-  const bar = $("cueBar");
-  bar.style.transition = "none";
-  bar.style.transform = "scaleX(1)";
-  void bar.offsetWidth;  // restart the bar animation
-  bar.style.transition = `transform ${cue.duration_ms}ms linear`;
-  bar.style.transform = "scaleX(0)";
-  cam.classList.add("cueing");
+  panel.run(cue, why);
   banner.textContent = "";
-  const t0 = performance.now();
-  const tick = () => ($("cueCount").textContent = Math.max(1, Math.ceil((cue.duration_ms - (performance.now() - t0)) / 1000)));
-  tick();
-  const timer = setInterval(tick, 200);
   const startYaw = latest?.yaw ?? null, state = { open: false };
+  let shot;
   try {
-    const shot = await burst(cue.frames, cue.duration_ms, { challengeId: cue.id, until: () => cueSeen(cue, startYaw, state) });
-    if (shot.early) {  // brief confirmation before the result
-      clearInterval(timer);
-      $("cueEyebrow").textContent = `${why} · got it`;
-      $("cueCount").textContent = "✓";
-      bar.style.transition = "none";
-    }
+    shot = await burst(cue.frames, cue.duration_ms, { challengeId: cue.id, until: () => cueSeen(latest, cue, startYaw, state) });
     return shot;
   } finally {
-    clearInterval(timer);
-    hideCue();
+    panel.end(shot?.early, why);  // brief "got it" when it ended early
   }
 }
 
 /** Big guidance panel (no capture), e.g. "take your glasses off". */
 function showGuide(title, text, icon) {
-  cueEl.className = "cue go guide";
-  $("cueIcon").innerHTML = ICON[icon] || "";
-  $("cueEyebrow").textContent = title;
-  $("cueText").textContent = text;
-  $("cueCount").textContent = "";
-  $("cueBar").style.transition = "none";
-  $("cueBar").style.transform = "scaleX(0)";
-  cam.classList.add("cueing");
+  panel.guide(title, text, icon);
   banner.textContent = "";
 }
 
-function hideCue() {
-  cueEl.className = "cue hidden";
-  cam.classList.remove("cueing");
-}
+const hideCue = () => panel.hide();
 
 function setCamState(state) {
   cam.classList.remove("capturing", "allow", "deny", "verify");
@@ -265,7 +214,7 @@ async function handleNext(res) {
     const glasses = (res.reasons || []).find((r) => r.startsWith("Wearing glasses"));
     if (res.decision === "DENY" && glasses) {  // a likely-glasses miss: say it big, then step back
       showGuide(res.reasons[0], glasses, "glasses");
-      setTimeout(() => cueEl.classList.contains("guide") && hideCue(), 4000);  // never a live cue started since
+      setTimeout(() => panel.isGuide() && hideCue(), 4000);  // never a live cue started since
     }
     banner.textContent = res.decision === "ALLOW" ? "Access granted" : "Access denied";
     scheduleReset();

@@ -138,6 +138,12 @@ main { padding: 40px 32px 64px; max-width: 1240px; margin: 0 auto; }
 @keyframes cue-left { 50% { transform: translateX(-12px); } }
 @keyframes cue-right { 50% { transform: translateX(12px); } }
 @keyframes cue-blink { 45%, 55% { transform: scaleY(.1); } }
+/* compact cue for the small console / confirm-it's-you cameras */
+.small-cam .cue { padding: 12px 14px; column-gap: 12px; }
+.small-cam .cue-icon { width: 46px; height: 46px; }
+.small-cam .cue-text { font-size: 20px; }
+.small-cam .cue-count { font-size: 40px; }
+.small-cam .cue-bar { margin-top: 10px; }
 @media (max-width: 600px) {
   .cue { padding: 12px 14px; column-gap: 12px; }
   .cue-icon { width: 46px; height: 46px; }

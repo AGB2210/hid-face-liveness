@@ -65,11 +65,11 @@
     <p class="small muted signin-foot">Every sign-in attempt and face check is recorded in the audit log.</p>
   </main>
   <script type="module">
-    import { esc, faceCheck, framesForm, getMe, homeFor, postForm, startCamera } from "../common.js";
+    import { esc, faceCheck, followFace, framesForm, getMe, homeFor, postForm, startCamera } from "../common.js";
     const $ = (id) => document.getElementById(id);
     const next = new URLSearchParams(location.search).get("next");
     const dest = (me) => (next && next.startsWith("/console/") ? next : homeFor(me));
-    let userId = "", faceToken = "", stream = null;
+    let userId = "", faceToken = "", stream = null, face = null;
 
     const me = await getMe();
     if (me.user_id) location.replace(dest(me));
@@ -84,7 +84,7 @@
       $("codeForm").classList.toggle("hidden", k !== "code");
       $("msg").textContent = "";
     }
-    const stopCamera = () => { stream?.getTracks().forEach((t) => t.stop()); stream = null; };
+    const stopCamera = () => { face?.stop(); face = null; stream?.getTracks().forEach((t) => t.stop()); stream = null; };
     function toCode(text) {
       stopCamera();
       $("factor").innerHTML = text;
@@ -98,13 +98,17 @@
       $("retry").classList.add("hidden");
       $("faceMsg").textContent = "";
       try {
-        stream ??= await startCamera($("video"), 640);
-        $("banner").textContent = "Look at the camera";
-        await new Promise((r) => setTimeout(r, 800));
+        if (!stream) {
+          stream = await startCamera($("video"), 640);
+          $("banner").textContent = "Look at the camera";
+          await new Promise((r) => setTimeout(r, 500));  // let a just-opened camera settle its exposure
+        }
+        face ??= followFace($("video"));
         const r = await faceCheck("", $("video"), {
           say: (t) => ($("banner").textContent = t),
           progress: (p) => ($("progress").style.width = `${p * 100}%`),
           state: (c) => ($("cam").className = `cam small-cam ${c || ""}`),
+          cam: $("cam"), latest: face.latest, why: "Sign in",
         });
         if (r.ok) {
           userId = r.user_id;

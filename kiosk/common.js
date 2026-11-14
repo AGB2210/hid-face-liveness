@@ -241,17 +241,132 @@ export async function kioskNav() {
   return me;
 }
 
+/* ---------------------------------------------------------------- live cue (kiosk + console) */
+export const CUE_ICON = {
+  glasses: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="28" r="8"/><circle cx="35" cy="28" r="8"/><path d="M21 27c2-2 4-2 6 0M5 26 3 18M43 26l2-8"/><path d="M8 40 40 12" stroke-width="3"/></svg>',
+  blink: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M4 24c5-8 12-12 20-12s15 4 20 12c-5 8-12 12-20 12S9 32 4 24z"/><circle cx="24" cy="24" r="6" fill="currentColor"/></svg>',
+  turn_left: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 24H10M22 11 9 24l13 13"/></svg>',
+  turn_right: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 24h30M26 11l13 13-13 13"/></svg>',
+};
+
+/** Has the person done the cue? s = latest state from this device's face tracker, so the capture
+ *  can end the moment it happens. A little stricter than the server, which checks the frames again. */
+export function cueSeen(s, cue, startYaw, state) {
+  if (!s?.present) return false;
+  if (cue.action === "blink") {
+    if (s.blink < 0.25) state.open = true;            // eyes seen open first...
+    return state.open && s.blink >= 0.5;               // ...then closed
+  }
+  if (s.yaw == null || startYaw == null) return false;
+  const sign = cue.action === "turn_left" ? 1 : -1;    // yaw > 0 = turned to their own left
+  const moved = sign * (s.yaw - startYaw);
+  return moved >= 18 || (sign * s.yaw >= 18 && moved >= 8);  // same idea as the server: turned AND moved
+}
+
+/** The big cue panel over a camera box (.cam): icon, instruction, seconds left, time-left bar. */
+export function cuePanel(cam) {
+  let el = cam.querySelector(".cue");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "cue hidden";
+    el.setAttribute("role", "alert");
+    el.setAttribute("aria-live", "assertive");
+    el.innerHTML = '<div class="cue-icon"></div><div class="cue-eyebrow"></div><div class="cue-count"></div><div class="cue-text"></div><div class="cue-bar"><i></i></div>';
+    cam.appendChild(el);
+  }
+  const q = (c) => el.querySelector(c), bar = q(".cue-bar i");
+  let timer = null, hideT = null;
+  const reset = () => { clearInterval(timer); clearTimeout(hideT); timer = hideT = null; };
+  const api = {
+    /** Show the cue and start the countdown at once. */
+    run(cue, why = "Live check") {
+      reset();
+      el.className = `cue go ${cue.action}`;
+      q(".cue-icon").innerHTML = CUE_ICON[cue.action] || "";
+      q(".cue-eyebrow").textContent = `${why} · now`;
+      q(".cue-text").textContent = cue.instruction;
+      bar.style.transition = "none";
+      bar.style.transform = "scaleX(1)";
+      void bar.offsetWidth;  // restart the bar animation
+      bar.style.transition = `transform ${cue.duration_ms}ms linear`;
+      bar.style.transform = "scaleX(0)";
+      cam.classList.add("cueing");
+      const t0 = performance.now();
+      const tick = () => (q(".cue-count").textContent = Math.max(1, Math.ceil((cue.duration_ms - (performance.now() - t0)) / 1000)));
+      tick();
+      timer = setInterval(tick, 200);
+    },
+    /** Capture finished: a short "got it ✓" when the action was seen early, then hide. */
+    end(early, why = "Live check") {
+      reset();
+      if (!early) return api.hide();
+      const now = getComputedStyle(bar).transform;
+      bar.style.transition = "none";
+      bar.style.transform = now;  // freeze the bar where it was
+      q(".cue-eyebrow").textContent = `${why} · got it`;
+      q(".cue-count").textContent = "✓";
+      hideT = setTimeout(api.hide, 700);
+    },
+    /** Big guidance (no capture), e.g. "take your glasses off". */
+    guide(title, text, icon) {
+      reset();
+      el.className = "cue go guide";
+      q(".cue-icon").innerHTML = CUE_ICON[icon] || "";
+      q(".cue-eyebrow").textContent = title;
+      q(".cue-text").textContent = text;
+      q(".cue-count").textContent = "";
+      bar.style.transition = "none";
+      bar.style.transform = "scaleX(0)";
+      cam.classList.add("cueing");
+    },
+    isGuide: () => el.classList.contains("guide"),
+    hide() {
+      reset();
+      el.className = "cue hidden";
+      cam.classList.remove("cueing");
+    },
+  };
+  return api;
+}
+
+let trackerP = null;
+/** Follow the face in `video` on this device (MediaPipe in the browser), for ending cues early.
+ *  Returns { latest(), stop() }; latest() is null until the tracker has loaded. If it can't load,
+ *  cues still end early from the server's own check. */
+export function followFace(video) {
+  let latest = null, stopTrack = null, dead = false;
+  (async () => {
+    try {
+      const ft = await import("./facetrack.js");
+      trackerP ??= ft.createTracker();
+      const t = await trackerP;
+      if (!dead) stopTrack = ft.track(t, video, (s) => (latest = s), 10);
+    } catch { trackerP = null; }
+  })();
+  return { latest: () => latest, stop: () => { dead = true; stopTrack?.(); } };
+}
+
 /* ---------------------------------------------------------------- console face check */
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Live face check for a staff user: server-issued random cue, streamed capture, 1:1 match.
- *  ui = { say(text), progress(0..1), state(cls) }. Resolves to { ok, face_token, reasons }. */
+ *  Same cue as the kiosk: shown big at once, up to 5 s, ending as soon as the action is seen.
+ *  ui = { say(text), progress(0..1), state(cls), cam (the .cam box), latest() (face tracker), why }.
+ *  Resolves to { ok, face_token, reasons }. */
 export async function faceCheck(userId, video, ui) {
   const cue = await postForm("/api/admin/face/start", framesForm([], { user_id: userId }));
   ui.state?.("capturing");
-  ui.say(`${cue.instruction} now`);
-  // no countdown: up to duration_ms, ending as soon as the server sees the action
-  const shot = await captureStreamed(video, cue.frames, cue.duration_ms, 0.92, ui.progress, { challengeId: cue.id });
+  const panel = ui.cam ? cuePanel(ui.cam) : null;
+  const why = ui.why || "Face check";
+  if (panel) { panel.run(cue, why); ui.say(""); } else ui.say(`${cue.instruction} now`);
+  const startYaw = ui.latest?.()?.yaw ?? null, seen = { open: false };
+  let shot;
+  try {
+    shot = await captureStreamed(video, cue.frames, cue.duration_ms, 0.92, ui.progress, {
+      challengeId: cue.id, until: ui.latest ? () => cueSeen(ui.latest(), cue, startYaw, seen) : undefined });
+  } finally {
+    panel?.end(shot?.early, why);
+  }
   ui.say("Checking");
   const r = await postForm("/api/admin/face/verify", framesForm([shot.lastBlob], {
     user_id: userId, challenge_id: cue.id, burst_id: shot.burstId, n_frames: shot.n }));
@@ -296,14 +411,17 @@ export async function faceReauth(me) {
     } catch (err) { msg.textContent = err.message; msg.style.color = "var(--deny)"; }
   };
   m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); };
-  const close = () => { stream?.getTracks().forEach((t) => t.stop()); m.remove(); };
+  let face = null;
+  const close = () => { face?.stop(); stream?.getTracks().forEach((t) => t.stop()); m.remove(); };
   try {
     stream = await startCamera(video, 640);
+    face = followFace(video);
     for (let attempt = 0; attempt < 2 && !cancelled; attempt++) {
       const r = await faceCheck(me.user_id, video, {
         say: (t) => (m.querySelector(".banner").textContent = t),
         progress: (p) => (m.querySelector(".progress").style.width = `${p * 100}%`),
         state: (c) => { cam.className = `cam small-cam ${c || ""}`; },
+        cam, latest: face.latest, why: "Confirm it's you",
       });
       if (cancelled) return recDone;  // finished via recovery code meanwhile
       if (r.ok) {
