@@ -5,6 +5,17 @@ Everything runs locally on CPU with pretrained models; identity can be switched 
 
 ## Run
 
+**Windows: double-click `start.bat`.**
+- **First run:** it creates `.venv`, installs the packages, downloads the models (~450 MB including the one-time PyTorch install for the export) and exports MiniFASNet to ONNX.
+- **Every run:** it starts the server and opens http://localhost:8000.
+- **Stopping:** press Ctrl+C or close the window.
+- **Options:**
+  - `set PORT=8010` before running uses another port.
+  - `set NO_BROWSER=1` stops it opening the browser.
+  - Deleting `.venv\.installed` forces a package reinstall.
+
+Manual equivalent:
+
 ```bash
 py -3.12 -m venv .venv
 .venv/Scripts/pip install -r requirements.txt

@@ -1,0 +1,86 @@
+@echo off
+setlocal EnableExtensions
+title HID Liveness Kiosk
+cd /d "%~dp0"
+
+if not defined PORT set "PORT=8000"
+set "VENV=.venv"
+set "PY=%VENV%\Scripts\python.exe"
+set "URL=http://localhost:%PORT%"
+rem quieter MediaPipe / TFLite logs
+set "GLOG_minloglevel=2"
+set "TF_CPP_MIN_LOG_LEVEL=2"
+set "PYTHONUTF8=1"
+
+echo ============================================
+echo   HID Liveness Kiosk
+echo ============================================
+
+rem ---------- 1. Python virtual environment (first run only) ----------
+if exist "%PY%" goto :have_venv
+echo [setup] Creating Python virtual environment...
+set "BASEPY="
+for %%V in (3.12 3.11 3.10) do (
+  if not defined BASEPY (
+    py -%%V -c "import sys" >nul 2>&1 && set "BASEPY=py -%%V"
+  )
+)
+if not defined BASEPY (
+  python -c "import sys; sys.exit(0 if (3,10) <= sys.version_info[:2] <= (3,12) else 1)" >nul 2>&1 && set "BASEPY=python"
+)
+if not defined BASEPY (
+  echo [error] Python 3.10 - 3.12 not found. Install Python 3.12 from https://www.python.org/downloads/
+  goto :fail
+)
+%BASEPY% -m venv "%VENV%" || goto :fail
+:have_venv
+
+rem ---------- 2. Python packages (first run, or after deleting .venv\.installed) ----------
+if exist "%VENV%\.installed" goto :have_packages
+echo [setup] Installing Python packages (first run, a few minutes)...
+"%PY%" -m pip install --upgrade pip -q || goto :fail
+"%PY%" -m pip install -r requirements.txt -q || goto :fail
+echo ok> "%VENV%\.installed"
+:have_packages
+
+rem ---------- 3. Pretrained models (skips files already downloaded) ----------
+"%PY%" scripts\get_models.py || goto :fail
+
+rem ---------- 4. MiniFASNet -> ONNX export (first run only, needs torch once) ----------
+if exist "models\minifas_v2_2.7.onnx" if exist "models\minifas_v1se_4.0.onnx" goto :have_onnx
+echo [setup] Installing PyTorch (CPU) for the one-time model export...
+"%PY%" -c "import torch, onnx" >nul 2>&1 || "%PY%" -m pip install -q torch onnx --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple || goto :fail
+echo [setup] Exporting MiniFASNet to ONNX...
+"%PY%" scripts\export_minifas_onnx.py || goto :fail
+:have_onnx
+
+rem ---------- 5. Port check ----------
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul
+if not errorlevel 1 (
+  echo [error] Port %PORT% is already in use - is the kiosk already running in another window?
+  goto :fail
+)
+
+rem ---------- 6. Run backend + frontend (same server) ----------
+echo.
+echo   Kiosk:    %URL%
+echo   Enroll:   %URL%/enroll.html
+echo   Record:   %URL%/record.html
+echo.
+echo   Press Ctrl+C or close this window to stop.
+echo ============================================
+rem Open the browser once the server answers (runs in this console, so it dies with it)
+if not defined NO_BROWSER start "" /b powershell -NoProfile -ExecutionPolicy Bypass -Command "for($i=0;$i -lt 120;$i++){try{Invoke-WebRequest -UseBasicParsing '%URL%/api/config' -TimeoutSec 1 | Out-Null; Start-Process '%URL%'; break}catch{Start-Sleep -Milliseconds 500}}"
+
+"%PY%" -m uvicorn app:app --app-dir backend --host 127.0.0.1 --port %PORT%
+echo.
+echo Kiosk stopped.
+endlocal
+exit /b 0
+
+:fail
+echo.
+echo [error] Setup or start failed - see the messages above.
+pause
+endlocal
+exit /b 1
