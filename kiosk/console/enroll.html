@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HID Kiosk Enrollment</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
   <header>
-    <span class="logo">HID</span><h1>Enrollment</h1>
+    <a href="/console/" class="logo" style="text-decoration:none">HID</a><h1>Console · Enrollment</h1>
     <nav id="nav"></nav>
   </header>
   <main class="grid">
@@ -60,8 +60,8 @@
     </div>
   </section>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, staffNav, startCamera } from "./common.js";
-    import { createTracker, hint, track } from "./facetrack.js";
+    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, staffNav, startCamera } from "../common.js";
+    import { createTracker, hint, track } from "../facetrack.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("enroll");
     if (!guard(me, "manage_people", { firstRun: true })) await halt();
@@ -97,7 +97,7 @@
       if (e.target.hasAttribute("data-admin")) {
         try {
           await postForm(`/api/users/${encodeURIComponent(tr.dataset.id)}/admin_role`, framesForm([], { role: e.target.value }));
-          $("msg").textContent = `Admin role updated for ${tr.dataset.id}. Sign in on the Staff page to use it.`;
+          $("msg").textContent = `Admin role updated for ${tr.dataset.id}. Sign in at /console to use it.`;
         } catch (err) { $("msg").textContent = `Not changed: ${err.message}`; }
         loadUsers();
         return;

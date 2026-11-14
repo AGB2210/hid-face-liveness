@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HID Access Policy</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
   <header>
-    <span class="logo">HID</span><h1>Access policy</h1>
+    <a href="/console/" class="logo" style="text-decoration:none">HID</a><h1>Console · Access policy</h1>
     <nav id="nav"></nav>
   </header>
   <main>
@@ -60,7 +60,7 @@
     </section>
   </main>
   <script type="module">
-    import { esc, framesForm, guard, halt, postForm, staffNav } from "./common.js";
+    import { esc, framesForm, guard, halt, postForm, staffNav } from "../common.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("policy");
     if (!guard(me, "view_policy")) await halt();

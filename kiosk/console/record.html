@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HID Test Clip Recorder</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
   <header>
-    <span class="logo">HID</span><h1>Record test clips</h1>
+    <a href="/console/" class="logo" style="text-decoration:none">HID</a><h1>Console · Record test clips</h1>
     <nav id="nav"></nav>
   </header>
   <main class="grid">
@@ -40,7 +40,7 @@
     </section>
   </main>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, renderDebug, staffNav, startCamera } from "./common.js";
+    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, renderDebug, staffNav, startCamera } from "../common.js";
     const $ = (id) => document.getElementById(id);
     if (!guard(await staffNav("record"), "manage_people")) await halt();
     const cfg = await getConfig();

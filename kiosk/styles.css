@@ -234,3 +234,16 @@ header nav a.staff { margin-left: 12px; padding-left: 16px; border-left: 1px sol
 input.win-in { font: 400 12.5px/1.4 var(--mono); width: 100%; min-width: 150px; padding: 4px 0; }
 select.small-sel { font: 500 11px/1 var(--mono); padding: 2px 14px 2px 0; margin-left: 6px; }
 #editBar button { padding: 8px 14px; font-size: 13px; }
+
+/* ---------- console sign-in screen ---------------------------------------------------- */
+body.signin { display: flex; min-height: 100vh; }
+.signin-wrap { margin: auto; width: 100%; max-width: 420px; padding: 40px 16px; }
+.signin-card { border-top: 2px solid var(--ink); padding-top: 22px; }
+.signin-card h1 { font: 500 34px/1.1 var(--sans); letter-spacing: -.02em; margin: 26px 0 8px; }
+.signin-card .brand { font: 500 14px/1 var(--sans); }
+.signin-card button[type="submit"] { width: 100%; margin-top: 6px; }
+.signin-card .setup { margin-top: 26px; border-left: 2px solid var(--verify); padding: 4px 0 4px 14px; }
+.signin-foot { text-align: center; margin-top: 28px; }
+a.secondary-link { background: transparent; color: var(--ink); border: 1px solid var(--line-strong); text-decoration: none; display: inline-block; }
+header nav .navsep { flex: 0 0 1px; align-self: stretch; margin: 14px 4px; background: var(--line); }
+header nav .who { font: 500 12px/1 var(--mono); color: var(--muted); align-self: center; }

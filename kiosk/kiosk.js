@@ -1,4 +1,4 @@
-import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, staffNav, startCamera } from "./common.js";
+import { captureStreamed, esc, framesForm, getConfig, kioskNav, postForm, renderDebug, startCamera } from "./common.js";
 import { createTracker, hint, track } from "./facetrack.js";
 
 const $ = (id) => document.getElementById(id);
@@ -286,7 +286,7 @@ function onTrack(s) {
 }
 
 (async () => {
-  const me = await staffNav("kiosk");
+  const me = await kioskNav();
   staff = !!me.can?.kiosk_controls;
   cfg = await getConfig();
   initContext();

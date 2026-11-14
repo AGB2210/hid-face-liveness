@@ -643,4 +643,11 @@ def eval_run(request: Request) -> dict:
     return evaluation.evaluate()
 
 
+# Two apps: "/" is the public kiosk; "/console/" is the staff back office (own sign-in screen).
+for _old in ("enroll", "policy", "audit", "record", "report"):
+    app.add_api_route(f"/{_old}.html", (lambda name=_old: RedirectResponse(f"/console/{name}.html", status_code=308)),
+                      methods=["GET"], include_in_schema=False)
+app.add_api_route("/staff.html", lambda: RedirectResponse("/console/", status_code=308), methods=["GET"], include_in_schema=False)
+app.add_api_route("/console", lambda: RedirectResponse("/console/", status_code=308), methods=["GET"], include_in_schema=False)
+
 app.mount("/", StaticFiles(directory=ROOT / "kiosk", html=True), name="kiosk")

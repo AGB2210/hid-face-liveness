@@ -27,14 +27,23 @@ py -3.12 -m venv .venv
 
 Open http://localhost:8000 in Chrome or Edge, which need camera access.
 
-| Page | Purpose |
-|---|---|
-| `/enroll.html` | Enroll a person (2 s capture, 5 ArcFace templates) |
-| `/` | Kiosk: press Start or Space; "Show details" shows every signal |
-| `/record.html` | Record labelled test clips (live / print / screen / video / mask) for the evaluation |
-| `/report.html` | Results: press **Run evaluation** to replay every clip and compute the metrics |
-| `/policy.html` | Access schedule matrix and a "test a decision" tool |
-| `/audit.html` | Hash-chained decision log, sync status, chain integrity |
+There are two separate apps:
+
+| App | URL | Who sees it |
+|---|---|---|
+| **Kiosk** | `/` | Everyone. Face recognition and the access decision only, with no links to the back office. |
+| **Staff console** | `/console/` | Staff only. Its own sign-in screen (user ID + authenticator code), then role-filtered pages. |
+
+| Console page | Purpose | Roles |
+|---|---|---|
+| `/console/enroll.html` | Guided enrollment, people's roles and access expiry, authenticator QR codes, admin roles | Policy admin, operator |
+| `/console/policy.html` | Access schedule matrix, editing (policy admin), "test a decision" tool | All staff |
+| `/console/audit.html` | Hash-chained decision log, sync status, chain integrity | Policy admin, auditor |
+| `/console/record.html` | Record labelled test clips for the evaluation | Policy admin, operator |
+| `/console/report.html` | Results: **Run evaluation** replays every clip and computes the metrics | All staff |
+
+**First run:** until a policy admin exists, `/console/enroll.html` is open. Enroll yourself, scan the QR code, and set your admin role to Policy admin.
+Signed-in staff also get the demo controls on the kiosk: zone, demo clock, network-loss simulation and signals.
 
 ## Secure access beyond liveness
 
@@ -82,8 +91,8 @@ How it works:
 ## Evaluation
 
 1. Enroll each tester.
-2. On `/record.html`, record ~6+ clips per label per person. For attacks, set **Subject** to the person shown in the photo, screen or mask.
-3. Press **Run evaluation** on `/report.html`, or run `.venv/Scripts/python eval/run_eval.py`.
+2. On `/console/record.html`, record ~6+ clips per label per person. For attacks, set **Subject** to the person shown in the photo, screen or mask.
+3. Press **Run evaluation** on `/console/report.html`, or run `.venv/Scripts/python eval/run_eval.py`.
 
 The report shows:
 - **Headline metrics:** liveness detection accuracy, face authentication accuracy, FAR, FRR and decision time.

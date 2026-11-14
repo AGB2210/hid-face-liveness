@@ -137,48 +137,77 @@ export function renderDebug(res) {
   return `<table><tr><th>Check</th><th style="width:38%">Score</th><th>Details</th></tr>${rows.join("")}</table>`;
 }
 
-/* ---------------------------------------------------------------- staff roles + navigation */
-const NAV = [
-  ["kiosk", "/", "Kiosk", null],
-  ["enroll", "/enroll.html", "Enroll", "manage_people"],
-  ["policy", "/policy.html", "Policy", "view_policy"],
-  ["audit", "/audit.html", "Audit", "view_audit"],
-  ["record", "/record.html", "Record", "manage_people"],
-  ["report", "/report.html", "Results", "view_results"],
+/* ---------------------------------------------------------------- staff console */
+// Two separate apps share these helpers:
+//   /          the kiosk - public, recognition only, no links to the back office
+//   /console/  the staff console - its own sign-in screen, then role-filtered pages
+const CONSOLE = [
+  ["enroll", "/console/enroll.html", "Enroll", "manage_people"],
+  ["policy", "/console/policy.html", "Policy", "view_policy"],
+  ["audit", "/console/audit.html", "Audit", "view_audit"],
+  ["record", "/console/record.html", "Record", "manage_people"],
+  ["report", "/console/report.html", "Results", "view_results"],
 ];
 
 export async function getMe() {
   try { return await (await fetch("/api/admin/me")).json(); } catch { return { can: {} }; }
 }
 
-/** Fill <nav id="nav"> with the links this person may use, plus staff sign-in / sign-out. */
+/** First console page this role may open (where sign-in lands). */
+export function homeFor(me) {
+  const first = CONSOLE.find(([, , , perm]) => me.can?.[perm]);
+  return first ? first[1] : "/console/";
+}
+
+export async function signOut() {
+  await fetch("/api/admin/logout", { method: "POST" });
+  location.href = "/console/";
+}
+
+/** Console header nav: the pages this role may use, who is signed in, kiosk link, sign out. */
 export async function staffNav(active) {
   const me = await getMe();
   const can = me.can || {};
-  const links = NAV.filter(([k, , , perm]) => !perm || can[perm] || (k === "enroll" && me.bootstrap))
+  const links = CONSOLE.filter(([k, , , perm]) => can[perm] || (k === "enroll" && me.bootstrap))
     .map(([k, href, label]) => `<a href="${href}"${k === active ? ' class="active"' : ""}>${label}</a>`).join("");
-  const who = me.user_id
-    ? `<a href="/staff.html" class="staff">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</a>`
-    : `<a href="/staff.html" class="staff${active === "staff" ? " active" : ""}">Staff sign-in</a>`;
+  const right = me.user_id
+    ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="/" target="_blank" rel="noopener">Kiosk ↗</a><a href="#" id="signOut">Sign out</a>`
+    : `<a href="/console/">Sign in</a>`;
   const nav = document.getElementById("nav");
-  if (nav) nav.innerHTML = links + who;
+  if (nav) {
+    nav.innerHTML = links + `<span class="navsep"></span>` + right;
+    document.getElementById("signOut")?.addEventListener("click", (e) => { e.preventDefault(); signOut(); });
+  }
   return me;
 }
 
-/** Replace the page with a "staff only" notice unless the signed-in role has the permission. */
+/** Console page gate: signed-out visitors go to the sign-in screen; signed-in staff without
+ *  the permission see a notice. Returns true when the page may load. */
 export function guard(me, permission, { firstRun = false } = {}) {
   if (me.can?.[permission] || (firstRun && me.bootstrap)) return true;
+  if (!me.user_id) {
+    location.replace(`/console/?next=${encodeURIComponent(location.pathname)}`);
+    return false;
+  }
   const main = document.querySelector("main") || document.body;
   document.querySelectorAll("main ~ section, section.wide").forEach((el) => el.remove());
   main.className = "";
   main.innerHTML = `<section class="card" style="max-width:520px;margin:10vh auto 0">
-    <h2>Staff only</h2>
-    <p style="margin:0 0 18px">This page is for authorised staff. ${me.user_id
-      ? `Your role (${esc(me.role_name)}) doesn't include it.`
-      : "Sign in with your user ID and authenticator code."}</p>
-    <a class="btn" href="/staff.html?next=${encodeURIComponent(location.pathname)}" style="text-decoration:none;display:inline-block">Staff sign-in</a>
+    <h2>Not available for your role</h2>
+    <p style="margin:0 0 18px">You're signed in as ${esc(me.role_name)}, which doesn't include this page.</p>
+    <a class="btn" href="${homeFor(me)}" style="text-decoration:none;display:inline-block">Go to my console</a>
   </section>`;
   return false;
 }
 
-export const halt = () => new Promise(() => {}); // stop a page script after guard() locks the page
+export const halt = () => new Promise(() => {}); // stop a page script after guard()
+
+/** Kiosk header: nothing for the public; a quiet console link when staff are signed in. */
+export async function kioskNav() {
+  const me = await getMe();
+  const nav = document.getElementById("nav");
+  if (nav && me.user_id) {
+    nav.innerHTML = `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="${homeFor(me)}">Console</a>`;
+  }
+  return me;
+}

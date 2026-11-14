@@ -4,11 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HID Audit Log</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
   <header>
-    <span class="logo">HID</span><h1>Audit log</h1>
+    <a href="/console/" class="logo" style="text-decoration:none">HID</a><h1>Console · Audit log</h1>
     <nav id="nav"></nav>
   </header>
   <main>
@@ -28,7 +28,7 @@
     </section>
   </main>
   <script type="module">
-    import { esc, guard, halt, staffNav } from "./common.js";
+    import { esc, guard, halt, staffNav } from "../common.js";
     const $ = (id) => document.getElementById(id);
     if (!guard(await staffNav("audit"), "view_audit")) await halt();
     const SHORT = { ALLOW: "Allow", DENY: "Deny", REQUEST_VERIFICATION: "Step-up" };
