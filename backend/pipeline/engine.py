@@ -88,7 +88,8 @@ def action_done(frames: list[Frame], action: str) -> tuple[bool, dict]:
 
 def analyse(jpegs: list[bytes], claimed_id: str | None = None,
             challenge: dict | None = None, pre_frames: list[Frame] | None = None,
-            first_idx: int | None = None, provider_name: str | None = None) -> dict:
+            first_idx: int | None = None, provider_name: str | None = None,
+            provider=None) -> dict:
     """pre_frames: frames already analysed while the burst was still being captured
     (streaming upload). jpegs are the remaining frames, numbered from first_idx."""
     pre_frames = pre_frames or []
@@ -121,7 +122,7 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
             return _finish(result, t0, t_dec, t_frames, t_frames, t_frames)
 
         top = sorted(good or face_frames, key=lambda f: f.rank, reverse=True)[:3]
-        provider = get_provider(provider_name)
+        provider = provider or get_provider(provider_name)
         # A remote provider (Rekognition) is a network call: run it while liveness computes.
         fut = _POOL.submit(_safe_identify, provider, top, claimed_id) if provider.remote else None
         live = lv.run_all(face_frames, top)

@@ -6,6 +6,10 @@ Every clip is replayed through exactly the same pipeline as the kiosk. Metrics:
   * Headline numbers in the organisers' wording: liveness detection accuracy,
     face authentication accuracy, FAR, FRR, decision time
   * Ablation: how well each individual check separates live from attack
+
+Test subjects who aren't enrolled kiosk users (e.g. imported clips) get an evaluation-only
+face gallery: each one is enrolled from their first live clip, held in memory only (never
+written to the user database). That enrollment clip is left out of the identity metrics.
 """
 from __future__ import annotations
 
@@ -20,7 +24,9 @@ import numpy as np
 import vault
 from pipeline import engine
 from pipeline.config import CFG, DATA
-from pipeline.identity import identity_thresholds
+from pipeline.frames import analyse_frame, decode
+from pipeline.identity import IdentityProvider, LocalArcFace, identity_thresholds
+from pipeline.models import models_lock
 
 ATTACKS = ["print", "screen_photo", "video_replay", "mask"]
 BONA_FIDE = ["live", "live_glasses"]              # how people normally present themselves
@@ -62,10 +68,58 @@ def find_clips(root: Path) -> list[Path]:
     return sorted(root.glob("*/*/*/meta.json"))
 
 
-def run_clip(meta_path: Path) -> dict:
+def _clip_frames(meta_path: Path) -> list[bytes]:
+    return [vault.read_file(p) for p in sorted(meta_path.parent.glob("frame_*.jpg*"))]
+
+
+class EvalGallery(IdentityProvider):
+    """Local ArcFace over the enrolled users plus in-memory templates for test subjects."""
+
+    def __init__(self, extra: dict[str, np.ndarray]):
+        self.extra, self.arc = extra, LocalArcFace()
+
+    def enroll(self, user_id, name, phone, frames):
+        raise NotImplementedError("evaluation gallery is read-only")
+
+    def identify(self, frames, claimed_id=None):
+        import store
+        probe = self.arc._embed(frames).mean(axis=0)
+        probe /= np.linalg.norm(probe) + 1e-9
+        scores = {uid: float(np.max(e @ probe)) for uid, e in {**store.templates(), **self.extra}.items()}
+        best = max(scores, key=scores.get) if scores else None
+        return {"user_id": best, "name": best, "similarity": round(max(scores.get(best, 0.0), 0.0), 3),
+                "mode": "1:N", "scores": {k: round(v, 3) for k, v in scores.items()}}
+
+
+def build_gallery(paths: list[Path]) -> tuple[dict[str, np.ndarray], set[Path]]:
+    """Enroll every subject who isn't a kiosk user from their first live clip (best 5 frames)."""
+    import store
+    enrolled = set(store.templates())
+    first: dict[str, tuple] = {}
+    for p in paths:
+        meta = json.loads(p.read_text())
+        if meta["label"] != "live" or meta["subject"] in enrolled:
+            continue
+        key = (meta.get("created") or 0, str(p))
+        if meta["subject"] not in first or key < first[meta["subject"]][0]:
+            first[meta["subject"]] = (key, p)
+    arc, gallery, used = LocalArcFace(), {}, set()
+    for subject, (_, p) in sorted(first.items()):
+        with models_lock():
+            frames = [analyse_frame(i, im) for i, im in enumerate(decode(_clip_frames(p)))]
+            frames = sorted((f for f in frames if f.box is not None and f.lmk5 is not None),
+                            key=lambda f: f.rank, reverse=True)[:5]
+            if frames:
+                gallery[subject] = arc._embed(frames)
+                used.add(p)
+    return gallery, used
+
+
+def run_clip(meta_path: Path, provider=None, enrollment: bool = False) -> dict:
     meta = json.loads(meta_path.read_text())
-    frames = [vault.read_file(p) for p in sorted(meta_path.parent.glob("frame_*.jpg*"))]
-    res = engine.analyse(frames, None, None)
+    frames = _clip_frames(meta_path)
+    res = engine.analyse(frames, None, None, provider=provider,
+                         provider_name="local_arcface" if provider else None)
     live = res.get("liveness") or {}
     ident = res.get("identity") or {}
     scores = ident.get("scores") or {}
@@ -73,6 +127,7 @@ def run_clip(meta_path: Path) -> dict:
     return {
         "clip": str(meta_path.parent.relative_to(DATA)),
         "label": meta["label"], "subject": subject, "note": meta.get("note", ""),
+        "split": meta.get("split"), "enrollment": enrollment,
         "decision": res["decision"], "reasons": res["reasons"],
         "liveness": live.get("score"), "vetoes": live.get("vetoes", []),
         "checks": {k: (live.get("checks", {}).get(k) or {}).get("score") for k in CHECKS},
@@ -81,8 +136,8 @@ def run_clip(meta_path: Path) -> dict:
         "genuine_sim": scores.get(subject),
         "impostor_sims": [v for k, v in scores.items() if k != subject],
         "good_frames": res["quality"]["good_frames"], "frames": res["quality"]["frames"],
-        "occlusion": {k: (res.get("occlusion") or {}).get(k) for k in ("sunglasses", "mask")},
-        "quality_issues": res["quality"]["issues"],
+        "occlusion": res.get("occlusion") or {},
+        "quality_issues": res["quality"]["issues"], "blur": res["quality"]["blur"],
         "processing_ms": res["timing_ms"]["processing"],
         "capture_ms": meta.get("capture_ms") or CFG["capture"]["duration_ms"],
     }
@@ -96,10 +151,12 @@ def liveness_reject(r: dict, deny: float) -> bool:
     return r["liveness"] is None or bool(r["vetoes"]) or r["liveness"] < deny
 
 
-def summarise(rows: list[dict]) -> dict:
-    lc, ic = CFG["liveness"], identity_thresholds()
+def summarise(rows: list[dict], provider: str | None = None, with_splits: bool = True) -> dict:
+    lc, ic = CFG["liveness"], identity_thresholds(provider)
     live = [r for r in rows if r["label"] in BONA_FIDE]
     attacks = [r for r in rows if r["label"] in ATTACKS]
+    # decisions and identity for live people: leave out the clip a test subject was enrolled from
+    live_id = [r for r in live if not r.get("enrollment")]
 
     # ---- liveness, per attack type ------------------------------------------------
     bpcer = rate(sum(liveness_reject(r, lc["deny"]) for r in live), len(live))
@@ -125,11 +182,11 @@ def summarise(rows: list[dict]) -> dict:
     liveness_acc = rate(correct, len(live) + len(attacks))
 
     # ---- face authentication (live clips only) -------------------------------------
-    gen = [r["genuine_sim"] for r in live if r["genuine_sim"] is not None]
-    imp = [s for r in live for s in r["impostor_sims"]]
+    gen = [r["genuine_sim"] for r in live_id if r["genuine_sim"] is not None]
+    imp = [s for r in live_id for s in r["impostor_sims"]]
     fr = sum(s < ic["match"] for s in gen)
     fa = sum(s >= ic["match"] for s in imp)
-    rank1 = sum(r["best_user"] == r["subject"] for r in live if r["genuine_sim"] is not None)
+    rank1 = sum(r["best_user"] == r["subject"] for r in live_id if r["genuine_sim"] is not None)
     face_acc = rate((len(gen) - fr) + (len(imp) - fa), len(gen) + len(imp))
 
     # ---- decision time ------------------------------------------------------------
@@ -149,7 +206,7 @@ def summarise(rows: list[dict]) -> dict:
               "bins_ms": list(range(0, 2200, 100))}
 
     # ---- live user experience --------------------------------------------------------
-    live_outcomes = {d: sum(r["decision"] == d for r in live) for d in DECISIONS}
+    live_outcomes = {d: sum(r["decision"] == d for r in live_id) for d in DECISIONS}
 
     # ---- confusion matrix ----------------------------------------------------------
     labels_present = [l for l in ALL_LABELS if any(r["label"] == l for r in rows)]
@@ -157,7 +214,7 @@ def summarise(rows: list[dict]) -> dict:
     # ---- real people with accessories: who gets let in, guided, or wrongly turned away
     accessories = {}
     for v in LIVE_VARIANTS:
-        rs = [r for r in rows if r["label"] == v]
+        rs = [r for r in rows if r["label"] == v and not r.get("enrollment")]
         if not rs:
             continue
         n = len(rs)
@@ -199,14 +256,25 @@ def summarise(rows: list[dict]) -> dict:
                          "far": (sum(s >= t for s in imp) / len(imp)) if imp else None,
                          "frr": (sum(s < t for s in gen) / len(gen)) if gen else None})
 
+    # ---- per split (train / validation / test), when the clips carry one -------------------
+    splits = {}
+    if with_splits:
+        for sp in sorted({r.get("split") for r in rows if r.get("split")}):
+            part = [r for r in rows if r.get("split") == sp]
+            sub = summarise(part, provider, with_splits=False)
+            splits[sp] = {"clips": len(part), "subjects": sub["subjects"], "headline": sub["headline"],
+                          "bpcer": sub["bpcer"], "live_outcomes": sub["live_outcomes"]}
+
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "splits": splits,
         "counts": {l: sum(r["label"] == l for r in rows) for l in ALL_LABELS},
         "accessories": accessories,
         "subjects": sorted({r["subject"] for r in rows}),
         "thresholds": {"liveness_allow": lc["allow"], "liveness_deny": lc["deny"],
                        "identity_match": ic["match"], "identity_borderline": ic["borderline"],
                        "identity_provider": ic["provider"]},
+        "eval_gallery": sorted({r["subject"] for r in rows if r.get("enrollment")}),
         "headline": {
             "liveness_accuracy": liveness_acc,
             "face_auth_accuracy": face_acc,
@@ -227,12 +295,15 @@ def evaluate(progress=None) -> dict:
     from pipeline.models import warmup
     warmup()
     paths = find_clips(DATA / "clips")
+    gallery, enroll_clips = build_gallery(paths)
+    # with test subjects in the gallery, score everyone with local ArcFace (the gallery's model)
+    provider = EvalGallery(gallery) if gallery else None
     rows = []
     for i, p in enumerate(paths):
-        rows.append(run_clip(p))
+        rows.append(run_clip(p, provider, p in enroll_clips))
         if progress:
             progress(i + 1, len(paths), rows[-1])
-    out = summarise(rows)
+    out = summarise(rows, "local_arcface" if provider else None)
     dest = DATA / "eval"
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "results.json").write_text(json.dumps(out, indent=1, default=float))

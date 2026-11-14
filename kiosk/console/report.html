@@ -94,7 +94,22 @@
         ${tile(t.total_p95 == null ? "n/a" : (t.total_p95 / 1000).toFixed(2) + " s", "Decision time (95th pct)", `median ${(t.total_p50 / 1000).toFixed(2)} s · max ${(t.total_max / 1000).toFixed(2)} s · ${p(t.under_2s, 0)} under 2 s`, t.total_max < 2000 ? "good" : "bad")}
         ${tile(p(h.attacks_allowed), "Attacks that got ALLOW", kn(h.attacks_allowed), cls(h.attacks_allowed.rate, 0, .05, false))}
       </div><p class="small muted">Small test set: 95% confidence intervals are shown so the numbers are not over-claimed.
-      Thresholds: liveness allow ≥ ${r.thresholds.liveness_allow}, deny &lt; ${r.thresholds.liveness_deny}; identity match ≥ ${r.thresholds.identity_match}.</p></section>`;
+      Thresholds: liveness allow ≥ ${r.thresholds.liveness_allow}, deny &lt; ${r.thresholds.liveness_deny}; identity match ≥ ${r.thresholds.identity_match}.
+      ${(r.eval_gallery || []).length ? `Test subjects ${esc(r.eval_gallery.join(", "))} aren't kiosk users, so each was enrolled (for this evaluation only, nothing saved) from their first live clip; that clip is left out of the identity and decision numbers.` : ""}</p></section>`;
+
+      const sp = Object.entries(r.splits || {});
+      if (sp.length) {
+        const order = { train: 0, validation: 1, test: 2 };
+        sp.sort(([a], [b]) => (order[a] ?? 9) - (order[b] ?? 9));
+        html += `<section class="card"><h2>By split</h2>
+          <p class="small muted">Thresholds are tuned on train and validation; <b>test</b> is the held-out check (different people).</p>
+          <table><tr><th>Split</th><th>People</th><th>Clips</th><th>Liveness accuracy</th><th>BPCER</th><th>Attacks allowed</th><th>FAR</th><th>FRR</th><th>Live: allowed / extra check / denied</th></tr>
+          ${sp.map(([name, x]) => `<tr${name === "test" ? ' class="cur"' : ""}><td>${esc(name)}</td><td>${esc(x.subjects.join(", "))}</td><td>${x.clips}</td>
+            <td>${p(x.headline.liveness_accuracy)} <span class="muted small">${kn(x.headline.liveness_accuracy)}</span></td>
+            <td>${p(x.bpcer)}</td><td>${p(x.headline.attacks_allowed)} <span class="muted small">${x.headline.attacks_allowed.k}/${x.headline.attacks_allowed.n}</span></td>
+            <td>${p(x.headline.far)}</td><td>${p(x.headline.frr)}</td>
+            <td>${x.live_outcomes.ALLOW} / ${x.live_outcomes.REQUEST_VERIFICATION} / ${x.live_outcomes.DENY}</td></tr>`).join("")}</table></section>`;
+      }
 
       html += `<section class="card"><h2>Per attack type (ISO/IEC 30107-3)</h2>
         <p class="small muted">APCER = share of attacks wrongly accepted. "System" counts attacks that reached ALLOW; "liveness" counts attacks the liveness score alone called live.

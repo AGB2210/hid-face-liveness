@@ -15,7 +15,7 @@ capture:
 
 quality:
   min_face_px: 110          # face box width in pixels
-  min_blur: 40.0            # variance of Laplacian on face crop
+  min_blur: 15.0            # variance of Laplacian on the face crop (resized to 160 px); sharp 640-px webcam faces measured 17-190
   min_brightness: 60        # mean gray level on face crop
   max_brightness: 210
   max_yaw_deg: 30
@@ -43,7 +43,7 @@ liveness:
     moire: 0.15
     glare: 0.10
   blink_bonus: 0.05         # added when a natural blink is seen
-  allow: 0.65               # fused liveness >= allow -> live
+  allow: 0.90               # fused liveness >= allow -> live (clip study: live >= 0.91, phone replays up to 0.87)
   deny: 0.35                # fused liveness <  deny  -> spoof
   veto:
     minifas_below: 0.10     # both MiniFASNet models say spoof with high confidence
@@ -69,9 +69,9 @@ admin:
   face_margin: 0.05         # console face check needs match threshold + this (stricter than the kiosk)
 
 occlusion:                  # accessories -> guidance (never a deny on their own)
-  eye_dark_ratio: 0.45      # eye region / cheek brightness below this -> sunglasses
+  eye_dark_ratio: 0.35      # eye region / cheek brightness below this -> sunglasses (overhead light gave bare eyes 0.445)
   lip_redness_min: -4.0     # lips not redder than own cheeks (Cr) ...
-  lower_dist_min: 12.0      # ... and lower face a different colour (CrCb) -> face mask
+  lower_dist_min: 22.0      # ... and lower face a different colour (CrCb) -> face mask (beards measured up to 18)
 
 challenge:
   ttl_s: 30

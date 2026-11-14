@@ -110,6 +110,8 @@ How it works:
 2. On `/console/record.html`, record ~6+ clips per label per person. For attacks, set **Subject** to the person shown in the photo, screen or mask.
 3. Press **Run evaluation** on `/console/report.html`, or run `.venv/Scripts/python eval/run_eval.py`.
 
+Clips recorded elsewhere (a zip of `clips/<id>/00.jpg…` with a `metadata.json` giving participant, scenario and split) can be imported with `.venv/Scripts/python scripts/import_clips.py clips.zip`. Test people who aren't enrolled get an evaluation-only face gallery built from their first live clip (nothing is saved to the user database), and the report adds a **By split** table: tune on train and validation, and quote the test split.
+
 The report shows:
 - **Headline metrics:** liveness detection accuracy, face authentication accuracy, FAR, FRR and decision time.
 - **Per attack type:** APCER, BPCER and ACER (ISO/IEC 30107-3).
