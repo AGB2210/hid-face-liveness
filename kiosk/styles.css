@@ -261,3 +261,7 @@ header nav a.console-btn:hover { border-color: var(--ink); }
 .modal-box h2 { font: 500 20px/1.2 var(--sans); margin: 0 0 8px; }
 .small-cam { aspect-ratio: 4 / 3; }
 pre.codes { font: 500 15px/1.8 var(--mono); background: var(--paper-2); padding: 12px 16px; margin: 0; columns: 2; }
+
+/* ---------- sign-in "or" divider ------------------------------------------------------- */
+.or { display: flex; align-items: center; gap: 12px; color: var(--muted); font: 500 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }

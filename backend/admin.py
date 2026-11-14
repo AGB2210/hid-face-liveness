@@ -6,9 +6,10 @@
 
 Everyone else (students, visitors) only ever sees the kiosk decision.
 
-Sign-in = enrolled user ID + a live face check (something you are, with a random cue) + a code
-from their authenticator app (something you have). Recovery codes stand in for the face check
-if a webcam fails. Policy edits and role grants need a face check from the last 5 minutes.
+Sign-in = identify yourself EITHER with a live face check (recognised among staff, with liveness
+and a random cue) OR by typing your email - then, either way, a code from your authenticator app.
+Policy edits and role grants need a face check from the last 5 minutes (a one-time recovery code
+can stand in for it if a webcam fails), so an email sign-in can't change anything sensitive.
 Every sign-in, failure, grant and policy change is audited.
 """
 from __future__ import annotations
@@ -92,10 +93,8 @@ def new_recovery_codes(user_id: str) -> list[str]:
     return codes
 
 
-def login(user_id: str, code: str, face_token: str | None = None, recovery_code: str | None = None) -> tuple[str | None, str]:
-    """Staff sign-in = face check (or a one-time recovery code) + authenticator code.
-    Returns (session token, message)."""
-    import hashlib
+def login(user_id: str, code: str, face_token: str | None = None) -> tuple[str | None, str]:
+    """Staff sign-in = (face check OR email) + authenticator code. Returns (session token, message)."""
     now = time.time()
     if _locked_out(user_id, now):
         return None, "Too many failed attempts - try again in a few minutes"
@@ -103,14 +102,12 @@ def login(user_id: str, code: str, face_token: str | None = None, recovery_code:
     if not (u and u.get("admin_role") in ROLES and _totp_ok(u, code)):
         _fail(user_id)
         return None, "Not authorised: needs a staff role and a valid authenticator code"
-    via = None
-    if take_face_token(face_token, user_id):
+    via = "email"
+    if face_token:
+        if not take_face_token(face_token, user_id):
+            _fail(user_id)
+            return None, "Face check expired - verify your face again"
         via = "face"
-    elif recovery_code and store.use_recovery_code(user_id, hashlib.sha256(recovery_code.strip().lower().encode()).hexdigest()):
-        via = "recovery code"
-    if not via:
-        _fail(user_id)
-        return None, "Face check missing or expired - verify your face again (or use a recovery code)"
     token = secrets.token_urlsafe(32)
     with _lock:
         _fails.pop(user_id, None)
@@ -119,10 +116,16 @@ def login(user_id: str, code: str, face_token: str | None = None, recovery_code:
     return token, f"Signed in ({via} + authenticator)"
 
 
-def reauth(sess_token: str | None, face_token: str | None) -> bool:
-    """Refresh the 'recent face check' mark on a session (step-up before sensitive actions)."""
+def reauth(sess_token: str | None, face_token: str | None, recovery_code: str | None = None) -> bool:
+    """Refresh the 'recent face check' mark on a session (step-up before sensitive actions).
+    A one-time recovery code is accepted instead of a face check if the webcam fails."""
+    import hashlib
     s = session(sess_token)
-    if not s or not take_face_token(face_token, s["user_id"]):
+    if not s:
+        return False
+    ok = take_face_token(face_token, s["user_id"]) or bool(
+        recovery_code and store.use_recovery_code(s["user_id"], hashlib.sha256(recovery_code.strip().lower().encode()).hexdigest()))
+    if not ok:
         return False
     with _lock:
         _sessions[sess_token]["face_at"] = time.time()

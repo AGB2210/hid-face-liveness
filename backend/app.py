@@ -160,12 +160,27 @@ def delete_user(request: Request, user_id: str) -> dict:
 @app.post("/api/enroll")
 async def enroll(request: Request, user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
                  role: str = Form("student"), valid_until: str = Form(""), poses: str = Form(""),
-                 frames: list[UploadFile] = File(...)) -> dict:
+                 email: str = Form(""), frames: list[UploadFile] = File(...)) -> dict:
     _allow(request, "manage_people", first_run=True)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", user_id):
         raise HTTPException(400, "user_id: letters, digits, _ . - only")
+    _check_email(email, user_id)
     jpegs = await _read(frames)
-    return await run_in_threadpool(_enroll, user_id, name, phone, role, valid_until, jpegs, poses)
+    res = await run_in_threadpool(_enroll, user_id, name, phone, role, valid_until, jpegs, poses)
+    if email.strip():
+        store.set_email(user_id, email)
+    return res
+
+
+def _check_email(email: str, user_id: str) -> None:
+    e = store.normalise_email(email)
+    if not e:
+        return
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", e):
+        raise HTTPException(400, "That email address doesn't look right")
+    other = store.get_user_by_email(e)
+    if other and other["id"] != user_id:
+        raise HTTPException(409, "That email is already used by someone else")
 
 
 def _enroll(user_id, name, phone, role, valid_until, jpegs, poses: str = "") -> dict:
@@ -243,8 +258,12 @@ def _new_totp(user_id: str, name: str) -> dict:
 
 
 @app.post("/api/users/{user_id}/access")
-def set_access(request: Request, user_id: str, role: str = Form(...), valid_until: str = Form("")) -> dict:
+def set_access(request: Request, user_id: str, role: str = Form(...), valid_until: str = Form(""),
+               email: str | None = Form(None)) -> dict:
     _allow(request, "manage_people")
+    if email is not None:
+        _check_email(email, user_id)
+        store.set_email(user_id, email)
     if not store.get_user(user_id):
         raise HTTPException(404, "unknown user")
     if role not in policy.roles(node.current_policy()):
@@ -326,31 +345,34 @@ def audit(request: Request, limit: int = 200) -> dict:
 
 # ---------------------------------------------------------------- qualified roles
 @app.post("/api/admin/face/start")
-def admin_face_start(user_id: str = Form(...)) -> dict:
-    """Step 1 of staff sign-in: a random live cue bound to this user ID. (Issued for any ID so the
-    endpoint doesn't reveal who is staff; only a real staff member can pass the check.)"""
-    ch = sessions.new_challenge(user_id.strip(), user_id.strip())
+def admin_face_start(user_id: str = Form("")) -> dict:
+    """A random live cue for a staff face check. With a user ID it is a 1:1 check for that person
+    (step-up re-check); without one the face itself identifies the staff member (sign-in)."""
+    uid = user_id.strip() or None
+    ch = sessions.new_challenge(uid, uid)
+    ch["purpose"] = "admin"
     return {"id": ch["id"], "action": ch["action"], "instruction": ch["instruction"],
             "duration_ms": CFG["capture"]["challenge_duration_ms"], "frames": CFG["capture"]["challenge_frames"]}
 
 
 @app.post("/api/admin/face/verify")
-async def admin_face_verify(user_id: str = Form(...), challenge_id: str = Form(...), burst_id: str = Form(""),
+async def admin_face_verify(user_id: str = Form(""), challenge_id: str = Form(...), burst_id: str = Form(""),
                             n_frames: int = Form(0), frames: list[UploadFile] = File(...)) -> dict:
     jpegs = await _read(frames)
     return await run_in_threadpool(_admin_face_check, user_id.strip(), challenge_id, burst_id, n_frames, jpegs)
 
 
 def _admin_face_check(user_id, challenge_id, burst_id, n_frames, jpegs) -> dict:
-    """1:1 face match against THIS user + liveness + the random cue, with a stricter threshold
-    than the kiosk. A pass yields a short-lived single-use token for the sign-in step."""
+    """Face + liveness + the random cue, with a stricter threshold than the kiosk. With user_id it
+    is a 1:1 check; without, the face identifies which staff member this is. A pass yields a
+    short-lived single-use token for the next step."""
     from pipeline.identity import identity_thresholds
     ch = sessions.take_challenge(challenge_id)
-    if not ch or ch.get("claimed_id") != user_id:
+    if not ch or ch.get("purpose") != "admin" or (ch.get("claimed_id") or "") != user_id:
         raise HTTPException(410, "Face check expired - start again")
     pre, _ = bursts.collect(burst_id, expected=max(0, n_frames - len(jpegs))) if burst_id else ([], 0.0)
     offline = node.offline()
-    res = engine.analyse(jpegs, user_id, ch, pre_frames=pre,
+    res = engine.analyse(jpegs, user_id or None, ch, pre_frames=pre,
                          first_idx=(n_frames - len(jpegs)) if burst_id else None,
                          provider_name="local_arcface" if offline else None)
     ident, live = res.get("identity") or {}, res.get("liveness") or {}
@@ -366,26 +388,33 @@ def _admin_face_check(user_id, challenge_id, burst_id, n_frames, jpegs) -> dict:
         reasons.append("Liveness too low")
     if occ.get("sunglasses") or occ.get("mask"):
         reasons.append("Remove sunglasses / face mask")
-    if ident.get("user_id") != user_id or (ident.get("similarity") or 0) < need:
-        reasons.append("Face does not match this user")
-    ok = not reasons and admin.is_staff(user_id)
+    target = user_id or ident.get("user_id")
+    if not target or ident.get("user_id") != target or (ident.get("similarity") or 0) < need:
+        reasons.append("Face does not match this user" if user_id else "Face not recognised as staff")
+    ok = not reasons and admin.is_staff(target)
     if not ok and not reasons:
-        reasons.append("Face does not match this user")
-    if not ok:
-        admin._fail(user_id)
-    store.append_audit(node.KIOSK_ID, None, user_id, "ADMIN_FACE_OK" if ok else "ADMIN_FACE_FAIL", "admin",
+        reasons.append("Face not recognised as staff")  # don't reveal who a non-staff face belongs to
+    if not ok and target:
+        admin._fail(target)
+    store.append_audit(node.KIOSK_ID, None, target if ok or user_id else None, "ADMIN_FACE_OK" if ok else "ADMIN_FACE_FAIL", "admin",
                        node.mode(), live.get("score"), ident.get("similarity"), None,
                        ["Console face check passed"] if ok else reasons)
     out = {"ok": ok, "reasons": reasons or ["Face verified"]}
     if ok:
-        out["face_token"] = admin.issue_face_token(user_id)
+        u = store.get_user(target)
+        out.update(face_token=admin.issue_face_token(target), user_id=target, name=u["name"] if u else target,
+                   role_name=admin.ROLES.get(u.get("admin_role")) if u else None)
     return out
 
 
 @app.post("/api/admin/reauth")
-def admin_reauth(request: Request, face_token: str = Form(...)) -> dict:
-    if not admin.reauth(request.cookies.get("hid_admin"), face_token):
+def admin_reauth(request: Request, face_token: str = Form(""), recovery_code: str = Form("")) -> dict:
+    if not admin.reauth(request.cookies.get("hid_admin"), face_token or None, recovery_code or None):
         raise HTTPException(403, "Face re-check failed")
+    if recovery_code:
+        s = _sess(request)
+        store.append_audit(node.KIOSK_ID, None, s["user_id"] if s else None, "RECOVERY_CODE_USED", "admin",
+                           node.mode(), None, None, None, ["Recovery code used instead of a face re-check"])
     return {"ok": True}
 
 
@@ -403,11 +432,15 @@ def admin_recovery_codes(request: Request) -> dict:
 
 
 @app.post("/api/admin/login")
-def admin_login(user_id: str = Form(...), code: str = Form(...), face_token: str = Form(""),
-                recovery_code: str = Form("")):
+def admin_login(user_id: str = Form(...), code: str = Form(...), face_token: str = Form("")):
+    """user_id is the email typed on the sign-in screen, or the user ID a face check recognised."""
     from fastapi.responses import JSONResponse
-    token, msg = admin.login(user_id.strip(), code, face_token or None, recovery_code or None)
-    store.append_audit(node.KIOSK_ID, None, user_id.strip() or None, "ADMIN_SIGNIN" if token else "ADMIN_DENIED",
+    ident = user_id.strip()
+    if "@" in ident:
+        u = store.get_user_by_email(ident)
+        ident = u["id"] if u else f"unknown:{ident.lower()}"
+    token, msg = admin.login(ident, code, face_token or None)
+    store.append_audit(node.KIOSK_ID, None, ident or None, "ADMIN_SIGNIN" if token else "ADMIN_DENIED",
                        "admin", node.mode(), None, None, None, [msg])
     if not token:
         raise HTTPException(403, msg)
@@ -458,6 +491,8 @@ def set_admin_role(request: Request, user_id: str, role: str = Form("")) -> dict
         raise HTTPException(401, "reauth_face")
     if not store.get_user(user_id).get("totp_secret"):
         raise HTTPException(400, "This person needs an authenticator app first (New QR on the Enroll page)")
+    if role and not store.get_user(user_id).get("email"):
+        raise HTTPException(400, "Add this person's email first - staff sign in with it")
     store.set_admin_role(user_id, role or None)
     by = s["user_id"] if s else "first-run setup"
     store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,

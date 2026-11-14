@@ -256,9 +256,26 @@ export async function faceReauth(me) {
     <div class="cam small-cam"><video playsinline muted></video><div class="guide"></div>
       <div class="banner"></div><div class="progress"></div></div>
     <div class="row" style="margin-top:14px;justify-content:space-between"><span class="small" data-msg></span>
-      <button class="secondary" data-cancel>Cancel</button></div>`);
+      <button class="secondary" data-cancel>Cancel</button></div>
+    <form class="row hidden" data-rec style="margin-top:12px;align-items:flex-end">
+      <label style="flex:1">Recovery code <input data-code placeholder="xxxxxx-xxxxxx" autocomplete="off" /></label>
+      <button type="submit">Confirm</button></form>
+    <a href="#" class="small muted" data-userec style="display:inline-block;margin-top:10px">Camera not working? Use a recovery code</a>`);
   const video = m.querySelector("video"), cam = m.querySelector(".cam"), msg = m.querySelector("[data-msg]");
   let stream, cancelled = false;
+  // recovery-code fallback: resolves the whole dialog when the server accepts the code
+  let recResolve;
+  const recDone = new Promise((r) => (recResolve = r));
+  m.querySelector("[data-userec]").onclick = (e) => { e.preventDefault(); m.querySelector("[data-rec]").classList.remove("hidden"); m.querySelector("[data-code]").focus(); };
+  m.querySelector("[data-rec]").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await postForm("/api/admin/reauth", framesForm([], { recovery_code: m.querySelector("[data-code]").value }));
+      cancelled = true;
+      close();
+      recResolve(true);
+    } catch (err) { msg.textContent = err.message; msg.style.color = "var(--deny)"; }
+  };
   m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); };
   const close = () => { stream?.getTracks().forEach((t) => t.stop()); m.remove(); };
   try {
@@ -269,6 +286,7 @@ export async function faceReauth(me) {
         progress: (p) => (m.querySelector(".progress").style.width = `${p * 100}%`),
         state: (c) => { cam.className = `cam small-cam ${c || ""}`; },
       });
+      if (cancelled) return recDone;  // finished via recovery code meanwhile
       if (r.ok) {
         await postForm("/api/admin/reauth", framesForm([], { face_token: r.face_token }));
         close();
@@ -279,10 +297,12 @@ export async function faceReauth(me) {
       await pause(1500);
     }
   } catch (e) {
-    msg.textContent = `Camera unavailable (${e.message}). Cancel, or sign in again with a recovery code.`;
+    msg.textContent = `Camera unavailable (${e.message}). Use a recovery code below, or cancel.`;
     msg.style.color = "var(--deny)";
-    await new Promise((r) => { m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); r(); }; });
-    return false;
+    m.querySelector("[data-rec]").classList.remove("hidden");
+    return await Promise.race([recDone, new Promise((r) => {
+      m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); r(false); };
+    })]);
   }
   if (!cancelled) { await pause(1200); close(); }
   return false;

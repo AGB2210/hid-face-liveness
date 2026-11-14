@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS audit (
   stage TEXT, mode TEXT, liveness REAL, similarity REAL, schedule TEXT, reasons TEXT,
   prev_hash TEXT, hash TEXT, synced INTEGER DEFAULT 0, received REAL);
 """)
-for _col in ("role", "valid_until", "totp_secret", "admin_role"):
+for _col in ("role", "valid_until", "totp_secret", "admin_role", "email"):
     if _col not in [r["name"] for r in _db.execute("PRAGMA table_info(users)")]:
         _db.execute(f"ALTER TABLE users ADD COLUMN {_col} TEXT")
 _db.commit()
@@ -98,7 +98,7 @@ def delete_user(user_id: str) -> None:
 
 
 def list_users() -> list[dict]:
-    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.created, u.role, u.valid_until, u.admin_role,
+    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.email, u.created, u.role, u.valid_until, u.admin_role,
                             (u.totp_secret IS NOT NULL) has_totp,
                             (SELECT COUNT(*) FROM templates t WHERE t.user_id=u.id) n,
                             (SELECT COUNT(*) FROM rek_faces r WHERE r.user_id=u.id) n_rekognition
@@ -143,6 +143,22 @@ def recent_attempts(limit: int = 50) -> list[dict]:
 def set_access(user_id: str, role: str | None, valid_until: str | None) -> None:
     with _lock:
         _db.execute("UPDATE users SET role=?, valid_until=? WHERE id=?", (role or None, valid_until or None, user_id))
+        _db.commit()
+
+
+def normalise_email(email: str | None) -> str | None:
+    e = (email or "").strip().lower()
+    return e or None
+
+
+def get_user_by_email(email: str) -> dict | None:
+    r = _db.execute("SELECT * FROM users WHERE email=?", (normalise_email(email),)).fetchone()
+    return dict(r) if r else None
+
+
+def set_email(user_id: str, email: str | None) -> None:
+    with _lock:
+        _db.execute("UPDATE users SET email=? WHERE id=?", (normalise_email(email), user_id))
         _db.commit()
 
 
