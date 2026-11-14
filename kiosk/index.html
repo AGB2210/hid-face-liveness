@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Liveness Kiosk</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Liveness Check</h1>
+    <nav><a href="/" class="active">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/record.html">Record test clips</a><a href="/report.html">Results</a></nav>
+  </header>
+  <main class="grid">
+    <section class="stack">
+      <div class="cam" id="cam">
+        <video id="video" playsinline muted></video>
+        <div class="guide"></div>
+        <div class="progress" id="progress"></div>
+        <div class="instruction" id="instruction"></div>
+        <div class="banner" id="banner">Starting camera…</div>
+      </div>
+      <div class="row">
+        <button id="start">Start check <span class="small muted">(Space)</span></button>
+        <label style="flex-direction:row;align-items:center;gap:8px">Badge
+          <select id="claimed"><option value="">None - search by face (1:N)</option></select>
+        </label>
+        <button class="secondary" id="toggleDebug">Show details</button>
+      </div>
+    </section>
+
+    <section class="stack">
+      <div class="decision" id="decision">
+        <div class="big muted">READY</div>
+        <div class="why">Look at the camera and press Start</div>
+      </div>
+
+      <div class="card otp hidden" id="otpCard">
+        <h2>One-time code</h2>
+        <p class="small muted" id="otpSent"></p>
+        <form id="otpForm" class="stack">
+          <input id="otpCode" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="••••••" />
+          <button type="submit">Verify code</button>
+        </form>
+      </div>
+
+      <div class="card hidden" id="phoneCard">
+        <h2>Demo phone (mock SMS)</h2>
+        <div class="phone" id="phone"><span class="muted small">No messages</span></div>
+      </div>
+
+      <div class="card hidden" id="debugCard">
+        <h2>Why this decision</h2>
+        <div id="debug" class="muted small">Run a check to see each signal.</div>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="kiosk.js"></script>
+</body>
+</html>

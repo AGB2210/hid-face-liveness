@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded / exported model weights (fetched by scripts/get_models.py)
+models/
+third_party/
+
+# Local data: biometric templates, test clips, eval output
+data/
+
+# Local tooling
+.vscode/
+.idea/
+
+# Not code
+*.jpg
+!kiosk/**/*.jpg

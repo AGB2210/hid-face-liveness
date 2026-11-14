@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Kiosk Enrollment</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Enrollment</h1>
+    <nav><a href="/">Kiosk</a><a href="/enroll.html" class="active">Enroll</a><a href="/record.html">Record test clips</a><a href="/report.html">Results</a></nav>
+  </header>
+  <main class="grid">
+    <section class="stack">
+      <div class="cam" id="cam">
+        <video id="video" playsinline muted></video>
+        <div class="guide"></div>
+        <div class="progress" id="progress"></div>
+        <div class="banner" id="banner">Starting camera…</div>
+      </div>
+    </section>
+    <section class="stack">
+      <div class="card">
+        <h2>New user</h2>
+        <form id="form" class="stack">
+          <label>User ID <input id="uid" required pattern="[A-Za-z0-9_.\-]{1,40}" placeholder="e.g. alice" /></label>
+          <label>Full name <input id="name" required placeholder="Alice Smith" /></label>
+          <label>Phone (for the OTP fallback, demo only) <input id="phone" placeholder="+91 …" /></label>
+          <button type="submit" id="go">Capture &amp; enroll (2 s)</button>
+          <div id="msg" class="small muted">Look straight at the camera in good light. Move your head very slightly during capture.</div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Enrolled users</h2>
+        <table id="users"></table>
+      </div>
+    </section>
+  </main>
+  <script type="module">
+    import { captureBurst, esc, framesForm, getConfig, postForm, startCamera } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const cfg = await getConfig();
+
+    async function loadUsers() {
+      const users = await (await fetch("/api/users")).json();
+      $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Templates</th><th></th></tr>" + (users.length
+        ? users.map((u) => `<tr><td>${esc(u.id)}</td><td>${esc(u.name)}</td><td>${u.n}</td><td><button class="secondary" data-del="${esc(u.id)}">Remove</button></td></tr>`).join("")
+        : '<tr><td colspan="4" class="muted">Nobody enrolled yet</td></tr>');
+    }
+    $("users").addEventListener("click", async (e) => {
+      const id = e.target.dataset?.del;
+      if (id && confirm(`Remove ${id}?`)) { await fetch(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" }); loadUsers(); }
+    });
+
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("go").disabled = true;
+      $("msg").textContent = "Capturing… hold still";
+      $("cam").classList.add("capturing");
+      try {
+        const { blobs } = await captureBurst($("video"), 10, 2000, cfg.capture.jpeg_quality,
+          (p) => ($("progress").style.width = `${p * 100}%`));
+        $("msg").textContent = "Processing…";
+        const r = await postForm("/api/enroll", framesForm(blobs, { user_id: $("uid").value.trim(), name: $("name").value.trim(), phone: $("phone").value.trim() }));
+        $("msg").textContent = `Enrolled ${r.user_id} with ${r.templates} face templates.`;
+        $("cam").className = "cam allow";
+        loadUsers();
+      } catch (err) {
+        $("msg").textContent = `Failed: ${err.message}`;
+        $("cam").className = "cam deny";
+      } finally {
+        $("go").disabled = false;
+        $("progress").style.width = "0";
+        setTimeout(() => ($("cam").className = "cam"), 2500);
+      }
+    });
+
+    loadUsers();
+    try { await startCamera($("video"), cfg.capture.width); $("banner").textContent = "Face inside the outline"; }
+    catch (e) { $("banner").textContent = `Camera unavailable: ${e.message}`; }
+  </script>
+</body>
+</html>

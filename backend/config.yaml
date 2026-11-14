@@ -1,0 +1,65 @@
+# All tunable thresholds and weights live here. Calibrate with eval/run_eval.py.
+
+runtime:
+  # ONNX Runtime providers in priority order. To use the GPU later:
+  #   pip install onnxruntime-gpu  and put CUDAExecutionProvider first.
+  providers: [CPUExecutionProvider]
+
+capture:
+  frames: 10            # frames per burst (kiosk reads this from /config)
+  duration_ms: 1000     # burst length
+  width: 960            # requested camera width
+  challenge_duration_ms: 1800
+  challenge_frames: 16
+  jpeg_quality: 0.92
+
+quality:
+  min_face_px: 110          # face box width in pixels
+  min_blur: 40.0            # variance of Laplacian on face crop
+  min_brightness: 60        # mean gray level on face crop
+  max_brightness: 210
+  max_yaw_deg: 30
+  max_pitch_deg: 25
+  min_good_frames: 4        # frames that must pass quality
+
+identity:
+  provider: local_arcface   # local_arcface | rekognition
+  match: 0.42               # cosine >= match -> identity match
+  borderline: 0.30          # borderline <= cosine < match -> ask for more verification
+
+liveness:
+  weights:
+    minifas: 0.45
+    flatness: 0.30
+    moire: 0.15
+    glare: 0.10
+  blink_bonus: 0.05         # added when a natural blink is seen
+  allow: 0.65               # fused liveness >= allow -> live
+  deny: 0.35                # fused liveness <  deny  -> spoof
+  veto:
+    minifas_below: 0.10     # both MiniFASNet models say spoof with high confidence
+    moire_below: 0.15       # strong screen pattern
+    flatness_below: 0.15    # head moved but landmarks stayed perfectly planar
+
+flatness:
+  # Optical-flow tracks inside the face. motion = median residual after a similarity fit
+  # (fraction of face width); ratio = homography residual / similarity residual.
+  min_motion: 0.01          # non-rigid motion needed before the test can judge
+  flat_ratio: 0.22          # ratio at/below this -> planar (synthetic planar warp = 0.16)
+  deep_ratio: 0.45          # ratio at/above this -> clearly 3-D  (CALIBRATE on real clips)
+
+moire:
+  peak_flat: 4.0            # spectral peak ratio below this -> no screen pattern
+  peak_screen: 9.0          # ratio above this -> screen pattern
+
+glare:
+  clean_frac: 0.004         # saturated-pixel fraction below this -> fine
+  glare_frac: 0.04          # above this -> strong specular glare
+
+challenge:
+  ttl_s: 30
+  blink_thresh: 0.45        # MediaPipe eyeBlink blendshape
+  turn_deg: 15              # yaw change needed for a head turn
+  pass_bonus: 0.15          # liveness bonus when the random action is performed on cue
+  max_otp_tries: 3
+  otp_digits: 6

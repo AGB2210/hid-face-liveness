@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Test Clip Recorder</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Record test clips</h1>
+    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/record.html" class="active">Record test clips</a><a href="/report.html">Results</a></nav>
+  </header>
+  <main class="grid">
+    <section class="stack">
+      <div class="cam" id="cam">
+        <video id="video" playsinline muted></video>
+        <div class="guide"></div>
+        <div class="progress" id="progress"></div>
+        <div class="banner" id="banner">Starting camera…</div>
+      </div>
+      <div class="card small muted">
+        Each button records one burst exactly like the kiosk does and saves it to <code>data/clips/&lt;label&gt;/&lt;subject&gt;/</code>.
+        <b>Subject</b> = the enrolled user ID whose face is shown (for attacks: the person in the photo / video / mask).
+        Vary lighting, distance and angle. Aim for ~6+ clips per label per subject.
+      </div>
+    </section>
+    <section class="stack">
+      <div class="card stack">
+        <h2>Clip settings</h2>
+        <label>Subject (enrolled user ID) <select id="subject"></select></label>
+        <label>Note (optional, e.g. "dim light", "glossy print") <input id="note" /></label>
+        <div class="labels" id="labels"></div>
+        <div id="msg" class="small muted">Pick a label to record.</div>
+      </div>
+      <div class="card">
+        <h2>Last clip - what the kiosk would decide</h2>
+        <div id="last" class="small muted">-</div>
+      </div>
+    </section>
+  </main>
+  <script type="module">
+    import { captureBurst, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const cfg = await getConfig();
+    const NAMES = { live: "Live person", print: "Printed photo", screen_photo: "Screen (photo)", video_replay: "Video replay", mask: "Mask" };
+    let counts = await (await fetch("/api/clips/counts")).json();
+
+    function drawLabels() {
+      $("labels").innerHTML = cfg.labels.map((l) =>
+        `<button data-label="${l}" class="${l === "live" ? "" : "secondary"}">${NAMES[l]}<span class="n">${counts[l] ?? 0} clips</span></button>`).join("");
+    }
+    const users = await (await fetch("/api/users")).json();
+    $("subject").innerHTML = users.length ? users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("")
+      : '<option value="">Enroll someone first</option>';
+    drawLabels();
+
+    $("labels").addEventListener("click", async (e) => {
+      const btn = e.target.closest("button");
+      if (!btn || !$("subject").value) return;
+      const label = btn.dataset.label;
+      document.querySelectorAll("#labels button").forEach((b) => (b.disabled = true));
+      $("msg").textContent = `Recording "${NAMES[label]}"…`;
+      $("cam").className = "cam capturing";
+      try {
+        const { blobs, captureMs } = await captureBurst($("video"), cfg.capture.frames, cfg.capture.duration_ms,
+          cfg.capture.jpeg_quality, (p) => ($("progress").style.width = `${p * 100}%`));
+        const r = await postForm("/api/record", framesForm(blobs, { label, subject: $("subject").value, capture_ms: captureMs, note: $("note").value }));
+        counts = r.counts;
+        drawLabels();
+        $("msg").textContent = `Saved ${r.saved}`;
+        const res = r.result;
+        $("last").innerHTML = `<p>Label <b>${esc(NAMES[label])}</b> → kiosk says <span class="pill ${res.decision}">${res.decision}</span> ${esc(res.reasons.join(" · "))}</p>` + renderDebug(res);
+      } catch (err) {
+        $("msg").textContent = `Failed: ${err.message}`;
+      } finally {
+        $("cam").className = "cam";
+        $("progress").style.width = "0";
+        document.querySelectorAll("#labels button").forEach((b) => (b.disabled = false));
+      }
+    });
+
+    try { await startCamera($("video"), cfg.capture.width); $("banner").textContent = "Ready"; }
+    catch (e) { $("banner").textContent = `Camera unavailable: ${e.message}`; }
+  </script>
+</body>
+</html>
