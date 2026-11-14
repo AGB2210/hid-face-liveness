@@ -13,6 +13,7 @@ ACTIONS = {
     "turn_left": "Turn your head to your LEFT",
     "turn_right": "Turn your head to your RIGHT",
 }
+ACTION_NAMES = {"blink": "Blink", "turn_left": "Left turn", "turn_right": "Right turn"}
 
 _lock = threading.Lock()
 _challenges: dict[str, dict] = {}
@@ -20,19 +21,29 @@ _otps: dict[str, dict] = {}
 OUTBOX: list[dict] = []   # mock "SMS" messages shown on the demo phone panel
 
 
-def new_challenge(candidate: str | None, claimed_id: str | None, avoid: str | None = None) -> dict:
-    """avoid='blink' when the eyes can't be seen (e.g. sunglasses): a head turn is just as random."""
+def new_challenge(candidate: str | None, claimed_id: str | None, avoid=None, attempt: int = 1) -> dict:
+    """avoid: actions not to ask for - 'blink' when the eyes can't be seen (sunglasses), or the
+    action that just failed, so a retry asks for something different. A head turn is just as random."""
+    avoid = {avoid} if isinstance(avoid, str) else set(avoid or ())
     ch = {
         "id": uuid.uuid4().hex,
-        "action": secrets.choice([a for a in ACTIONS if a != avoid] or list(ACTIONS)),
+        "action": secrets.choice([a for a in ACTIONS if a not in avoid] or list(ACTIONS)),
         "candidate": candidate,
         "claimed_id": claimed_id,
+        "attempt": attempt,
         "expires": time.time() + CFG["challenge"]["ttl_s"],
     }
     ch["instruction"] = ACTIONS[ch["action"]]
     with _lock:
         _challenges[ch["id"]] = ch
     return ch
+
+
+def peek_challenge(cid: str) -> dict | None:
+    """Look without using it up (to tell the kiosk early that the cue was done)."""
+    with _lock:
+        ch = _challenges.get(cid)
+    return ch if ch and ch["expires"] >= time.time() else None
 
 
 def take_challenge(cid: str) -> dict | None:

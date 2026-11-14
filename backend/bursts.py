@@ -25,7 +25,9 @@ def _get(burst_id: str) -> dict:
         return b
 
 
-def add_frame(burst_id: str, idx: int, jpeg: bytes) -> dict:
+def add_frame(burst_id: str, idx: int, jpeg: bytes, action: str | None = None) -> dict:
+    """action: the live cue this burst is for. The reply then says whether it is already done,
+    so the kiosk can stop capturing early (the final decision checks all frames again)."""
     b = _get(burst_id)
     t = time.perf_counter()
     imgs = decode([jpeg])
@@ -38,7 +40,12 @@ def add_frame(burst_id: str, idx: int, jpeg: bytes) -> dict:
         b["frames"][idx] = f
         b["ms"] += ms
         b["cond"].notify_all()
-    return {"ok": True, "idx": idx, "ms": round(ms, 1)}
+        so_far = [b["frames"][k] for k in sorted(b["frames"])]
+    out = {"ok": True, "idx": idx, "ms": round(ms, 1)}
+    if action:
+        from pipeline.engine import action_done
+        out["done"] = action_done([x for x in so_far if x.mesh is not None], action)[0]
+    return out
 
 
 def collect(burst_id: str, expected: int, timeout: float = 2.0) -> tuple[list[Frame], float]:

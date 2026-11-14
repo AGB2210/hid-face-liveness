@@ -9,8 +9,8 @@ capture:
   frames: 10            # frames per burst (kiosk reads this from /config)
   duration_ms: 1000     # burst length
   width: 960            # requested camera width
-  challenge_duration_ms: 3000   # time to do the cue (blink / head turn), after a 3-2-1 countdown
-  challenge_frames: 26          # ~9 fps, enough to catch a blink
+  challenge_duration_ms: 5000   # most time allowed for the cue; capture stops as soon as it's done
+  challenge_frames: 45          # ~9 fps over the full window
   jpeg_quality: 0.92
 
 quality:
@@ -75,8 +75,11 @@ occlusion:                  # accessories -> guidance (never a deny on their own
 
 challenge:
   ttl_s: 30
-  blink_thresh: 0.45        # MediaPipe eyeBlink blendshape
-  turn_deg: 15              # yaw change needed for a head turn
+  blink_thresh: 0.45        # MediaPipe eyeBlink blendshape: a full blink reaches this...
+  blink_min_peak: 0.30      # ...or, through glasses: peak at least this
+  blink_rise: 0.20          #    and this far above the person's own resting level
+  turn_deg: 15              # yaw change needed for a head turn (or reached, with turn_min_motion of movement)
+  turn_min_motion: 8        # degrees the head must move during the cue - a still photo of a turned head fails
   pass_bonus: 0.15          # liveness bonus when the random action is performed on cue
   max_otp_tries: 3
   otp_digits: 6

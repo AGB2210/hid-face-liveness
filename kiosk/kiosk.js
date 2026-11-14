@@ -22,38 +22,75 @@ const VERDICT = { inside: "Within window", grace: "Grace period", outside: "Outs
 
 /* ---------------------------------------------------------------- live cue */
 const ICON = {
+  glasses: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="28" r="8"/><circle cx="35" cy="28" r="8"/><path d="M21 27c2-2 4-2 6 0M5 26 3 18M43 26l2-8"/><path d="M8 40 40 12" stroke-width="3"/></svg>',
   blink: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M4 24c5-8 12-12 20-12s15 4 20 12c-5 8-12 12-20 12S9 32 4 24z"/><circle cx="24" cy="24" r="6" fill="currentColor"/></svg>',
   turn_left: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 24H10M22 11 9 24l13 13"/></svg>',
   turn_right: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 24h30M26 11l13 13-13 13"/></svg>',
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Show the cue big, count down 3-2-1, then capture while a bar shows the time left. */
+/** Has the person done the cue? Read from this device's own face tracker, so the capture can
+ *  end the moment it happens. A little stricter than the server, which checks the frames again. */
+function cueSeen(cue, startYaw, state) {
+  const s = latest;
+  if (!s?.present) return false;
+  if (cue.action === "blink") {
+    if (s.blink < 0.25) state.open = true;            // eyes seen open first...
+    return state.open && s.blink >= 0.5;               // ...then closed
+  }
+  if (s.yaw == null) return false;
+  const sign = cue.action === "turn_left" ? 1 : -1;    // yaw > 0 = turned to their own left
+  if (startYaw == null) return false;
+  const moved = sign * (s.yaw - startYaw);
+  return moved >= 18 || (sign * s.yaw >= 18 && moved >= 8);  // same idea as the server: turned AND moved
+}
+
+/** Show the cue big and start at once. Up to duration_ms (5 s), with a seconds-left counter;
+ *  the capture ends as soon as the action is seen. */
 async function cueCapture(cue, why = "Live check") {
-  cueEl.className = `cue ready ${cue.action}`;
+  cueEl.className = `cue go ${cue.action}`;
   $("cueIcon").innerHTML = ICON[cue.action] || "";
-  $("cueEyebrow").textContent = `${why} · get ready`;
+  $("cueEyebrow").textContent = `${why} · now`;
   $("cueText").textContent = cue.instruction;
   const bar = $("cueBar");
   bar.style.transition = "none";
   bar.style.transform = "scaleX(1)";
-  cam.classList.add("cueing");
-  banner.textContent = "";
-  for (const n of [3, 2, 1]) {
-    $("cueCount").textContent = n;
-    await sleep(700);
-  }
-  cueEl.className = `cue go ${cue.action}`;
-  $("cueEyebrow").textContent = `${why} · now`;
-  $("cueCount").textContent = "";
   void bar.offsetWidth;  // restart the bar animation
   bar.style.transition = `transform ${cue.duration_ms}ms linear`;
   bar.style.transform = "scaleX(0)";
+  cam.classList.add("cueing");
+  banner.textContent = "";
+  const t0 = performance.now();
+  const tick = () => ($("cueCount").textContent = Math.max(1, Math.ceil((cue.duration_ms - (performance.now() - t0)) / 1000)));
+  tick();
+  const timer = setInterval(tick, 200);
+  const startYaw = latest?.yaw ?? null, state = { open: false };
   try {
-    return await burst(cue.frames, cue.duration_ms);
+    const shot = await burst(cue.frames, cue.duration_ms, { challengeId: cue.id, until: () => cueSeen(cue, startYaw, state) });
+    if (shot.early) {  // brief confirmation before the result
+      clearInterval(timer);
+      $("cueEyebrow").textContent = `${why} · got it`;
+      $("cueCount").textContent = "✓";
+      bar.style.transition = "none";
+    }
+    return shot;
   } finally {
+    clearInterval(timer);
     hideCue();
   }
+}
+
+/** Big guidance panel (no capture), e.g. "take your glasses off". */
+function showGuide(title, text, icon) {
+  cueEl.className = "cue go guide";
+  $("cueIcon").innerHTML = ICON[icon] || "";
+  $("cueEyebrow").textContent = title;
+  $("cueText").textContent = text;
+  $("cueCount").textContent = "";
+  $("cueBar").style.transition = "none";
+  $("cueBar").style.transform = "scaleX(0)";
+  cam.classList.add("cueing");
+  banner.textContent = "";
 }
 
 function hideCue() {
@@ -173,14 +210,14 @@ function scheduleReset(ms = 8000) {
   resetTimer = setTimeout(() => !busy && !otpSession && idle(), ms);
 }
 
-async function burst(n, durationMs) {
+async function burst(n, durationMs, opts = {}) {
   setCamState("capturing");
   progress.style.transition = "none";
   progress.style.width = "0";
   const out = await captureStreamed(video, n, durationMs, cfg.capture.jpeg_quality, (p) => {
     progress.style.transition = "width .1s linear";
     progress.style.width = `${p * 100}%`;
-  });
+  }, opts);
   setTimeout(() => (progress.style.width = "0"), 300);
   return out;
 }
@@ -225,13 +262,23 @@ async function runCheck() {
 
 async function handleNext(res) {
   if (res.decision !== "REQUEST_VERIFICATION") {
+    const glasses = (res.reasons || []).find((r) => r.startsWith("Wearing glasses"));
+    if (res.decision === "DENY" && glasses) {  // a likely-glasses miss: say it big, then step back
+      showGuide(res.reasons[0], glasses, "glasses");
+      setTimeout(() => cueEl.classList.contains("guide") && hideCue(), 4000);  // never a live cue started since
+    }
     banner.textContent = res.decision === "ALLOW" ? "Access granted" : "Access denied";
     scheduleReset();
     return;
   }
   if (res.challenge_request) {
     const ch = res.challenge_request;
-    const shot = await cueCapture(ch, "Extra check");
+    const retry = /one more try/.test((res.reasons || [])[0] || "");
+    if (retry) {  // missed cue: say so, give time to take glasses off, then a different cue
+      showGuide(res.reasons[0], res.reasons[1] || "", "glasses");
+      await sleep(2500);
+    }
+    const shot = await cueCapture(ch, retry ? "One more try" : "Extra check");
     banner.textContent = "Analysing";
     const res2 = await verifyAndShow(shot.lastBlob, {
       challenge_id: ch.id, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() });

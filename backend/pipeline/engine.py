@@ -57,16 +57,33 @@ def fuse(live: dict, extra_bonus: float = 0.0) -> tuple[float, list[str]]:
 
 
 def action_done(frames: list[Frame], action: str) -> tuple[bool, dict]:
+    """Was the cued action done in these frames?
+    blink: a full blink (eyes closed, then open somewhere in the series), or a clear jump in eye
+           closure above the person's own resting level (glasses can damp the blink signal)
+    turn:  the head reached turn_deg towards the asked side - measured from facing the camera,
+           or from where the head was when capture began (people often start turning as soon
+           as they read the instruction). Turning the wrong way never counts."""
     c = CFG["challenge"]
     if action == "blink":
         s = lv.blink_series(frames)
-        return lv.blinked(frames, c["blink_thresh"]), {"blink_max": round(max(s), 3) if s else None}
+        if not s:
+            return False, {"reason": "eyes not visible"}
+        peak, base = max(s), float(np.median(s))
+        full = lv.blinked(frames, c["blink_thresh"])
+        rise = peak >= c["blink_min_peak"] and peak - base >= c["blink_rise"]
+        return bool(full or rise), {"blink_max": round(peak, 3), "blink_base": round(base, 3)}
     yaws = [f.yaw for f in frames if f.mesh is not None]
-    if len(yaws) < 3:
+    if len(yaws) < 2:
         return False, {"reason": "face lost"}
-    start = float(np.median(yaws[:2]))
-    delta = (max(yaws) - start) if action == "turn_left" else (start - min(yaws))
-    return delta >= c["turn_deg"], {"yaw_delta": round(delta, 1)}
+    sign = 1.0 if action == "turn_left" else -1.0   # yaw > 0 = turned to their own left
+    signed = [sign * y for y in yaws]
+    reached = max(signed)
+    delta = reached - float(np.median(signed[:2]))
+    moved = max(signed) - min(signed)
+    # facing the asked side alone isn't enough - a still photo of a turned head would pass - so
+    # the head must also visibly move during the cue
+    ok = delta >= c["turn_deg"] or (reached >= c["turn_deg"] and moved >= c["turn_min_motion"])
+    return bool(ok), {"yaw_reached": round(reached, 1), "yaw_delta": round(delta, 1), "yaw_moved": round(moved, 1)}
 
 
 def analyse(jpegs: list[bytes], claimed_id: str | None = None,

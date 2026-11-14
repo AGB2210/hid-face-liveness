@@ -34,6 +34,7 @@ from pipeline.frames import analyse_frame, decode  # noqa: E402
 from pipeline.identity import get_provider, identity_thresholds, provider_name  # noqa: E402
 from pipeline.models import models_lock, warmup  # noqa: E402
 
+GLASSES_HINT_AFTER = ("Identity not recognised", "Liveness check failed - possible spoof")  # biometric misses glasses can cause
 LABELS = ["live", "live_glasses", "live_sunglasses", "live_mask", "print", "screen_photo", "video_replay", "mask"]
 CLIPS = DATA / "clips"
 
@@ -623,11 +624,14 @@ async def verify(request: Request, frames: list[UploadFile] = File(...), claimed
 
 
 @app.post("/api/burst/{burst_id}/frame")
-async def burst_frame(burst_id: str, idx: int = Form(...), frame: UploadFile = File(...)) -> dict:
-    """Streaming capture: one frame, analysed as soon as it arrives."""
+async def burst_frame(burst_id: str, idx: int = Form(...), frame: UploadFile = File(...),
+                      challenge_id: str = Form("")) -> dict:
+    """Streaming capture: one frame, analysed as soon as it arrives. With a challenge_id the
+    reply also says whether the cue is already done, so the kiosk can stop early."""
     if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", burst_id):
         raise HTTPException(400, "bad burst id")
-    return await run_in_threadpool(bursts.add_frame, burst_id, idx, await frame.read())
+    ch = sessions.peek_challenge(challenge_id) if challenge_id else None
+    return await run_in_threadpool(bursts.add_frame, burst_id, idx, await frame.read(), ch["action"] if ch else None)
 
 
 def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames, zone, at) -> dict:
@@ -657,10 +661,29 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames, zon
     cue_passed = bool(challenge) and bool((res.get("challenge") or {}).get("passed"))
     _apply_context(res, zone, at or None, offline, cue_passed)
 
+    # A missed cue gets one more try (a different cue), not an instant deny - unless the
+    # liveness checks themselves flagged a spoof. Glasses often hide a blink, hence the hint.
+    retry_of = None
+    missed = challenge and res.get("challenge") and not res["challenge"].get("passed")
+    if (missed and res["decision"] == engine.DENY and challenge.get("attempt", 1) < 2
+            and not (res.get("liveness") or {}).get("vetoes")):
+        retry_of = challenge
+        res.update(decision=engine.VERIFY, next="challenge", reasons=[
+            f"{sessions.ACTION_NAMES[challenge['action']]} not detected - one more try",
+            "Wearing glasses? Take them off first"])
+    elif res["decision"] == engine.DENY and (res.get("reasons") or [""])[0] in GLASSES_HINT_AFTER:
+        res["reasons"] = [*res["reasons"], "Wearing glasses? Take them off and try again"]
+
     if res["decision"] == engine.VERIFY and res["next"] == "challenge":
         cand = res["identity"]["user_id"] if res.get("identity") else None
+        if retry_of:
+            cand = retry_of.get("candidate") or cand
         eyes_hidden = bool((res.get("occlusion") or {}).get("sunglasses"))
-        ch = sessions.new_challenge(cand, claimed_id or None, avoid="blink" if eyes_hidden else None)
+        avoid = {"blink"} if eyes_hidden else set()
+        if retry_of:
+            avoid.add(retry_of["action"])
+        ch = sessions.new_challenge(cand, claimed_id or None, avoid=avoid,
+                                    attempt=retry_of.get("attempt", 1) + 1 if retry_of else 1)
         res["challenge_request"] = {
             "id": ch["id"], "action": ch["action"], "instruction": ch["instruction"],
             "duration_ms": CFG["capture"]["challenge_duration_ms"],

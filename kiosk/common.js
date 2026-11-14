@@ -36,9 +36,12 @@ export async function captureBurst(video, n, durationMs, quality = 0.92, onProgr
   return { blobs, captureMs: performance.now() - t0 };
 }
 
-/** Like captureBurst, but uploads frames 0..n-2 to the server *while* capturing, so the
- *  network time overlaps with the capture. The last frame is returned for the verify call. */
-export async function captureStreamed(video, n, durationMs, quality = 0.92, onProgress) {
+/** Like captureBurst, but uploads frames to the server *while* capturing, so the network time
+ *  overlaps with the capture. The last frame is returned for the verify call.
+ *  Live cues (opts.challengeId) end early: as soon as opts.until() sees the action on this
+ *  device - a frame is taken at that instant - or the server reports it done, two more frames
+ *  are captured and the burst stops. n is then the number of frames actually captured. */
+export async function captureStreamed(video, n, durationMs, quality = 0.92, onProgress, opts = {}) {
   const burstId = crypto.randomUUID();
   const canvas = document.createElement("canvas");
   canvas.width = video.videoWidth;
@@ -47,27 +50,41 @@ export async function captureStreamed(video, n, durationMs, quality = 0.92, onPr
   const step = durationMs / Math.max(1, n - 1);
   const t0 = performance.now();
   const uploads = [];
-  let last = null;
+  const early = !!(opts.until || opts.challengeId);
+  let last = null, serverDone = false, stopAt = null, count = 0;
+  const seen = () => serverDone || !!opts.until?.();
   for (let i = 0; i < n; i++) {
-    await sleepUntil(t0 + i * step);
+    if (early) {
+      // wait for this frame's slot, but capture at once when the action is seen
+      while (performance.now() < t0 + i * step && !(stopAt === null && seen())) await new Promise((r) => setTimeout(r, 15));
+      if (stopAt === null && seen()) stopAt = i + 2;
+    } else {
+      await sleepUntil(t0 + i * step);
+    }
     ctx.drawImage(video, 0, 0);
     const blob = new Promise((r) => canvas.toBlob(r, "image/jpeg", quality));
-    if (i < n - 1) {
+    count = i + 1;
+    const final = i === n - 1 || (stopAt !== null && i >= stopAt);
+    if (!final) {
       uploads.push(blob.then((b) => {
         const fd = new FormData();
         fd.append("idx", i);
         fd.append("frame", b, `f${i}.jpg`);
+        if (opts.challengeId) fd.append("challenge_id", opts.challengeId);
         // one retry: a dropped frame would otherwise make the server wait for it
-        const send = () => fetch(`/api/burst/${burstId}/frame`, { method: "POST", body: fd }).then((r) => r.ok).catch(() => false);
+        const send = () => fetch(`/api/burst/${burstId}/frame`, { method: "POST", body: fd })
+          .then((r) => (r.ok ? r.json().then((j) => { if (j.done) serverDone = true; return true; }, () => true) : false))
+          .catch(() => false);
         return send().then((ok) => ok || send());
       }));
     } else {
       last = blob;
     }
-    onProgress?.((i + 1) / n);
+    onProgress?.(final ? 1 : (i + 1) / n);
+    if (final) break;
   }
   const lastBlob = await last;
-  return { burstId, lastBlob, captureMs: performance.now() - t0, n, uploads };
+  return { burstId, lastBlob, captureMs: performance.now() - t0, n: count, uploads, early: count < n };
 }
 
 export function framesForm(blobs, fields = {}) {
@@ -232,10 +249,9 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function faceCheck(userId, video, ui) {
   const cue = await postForm("/api/admin/face/start", framesForm([], { user_id: userId }));
   ui.state?.("capturing");
-  ui.say(`Get ready: ${cue.instruction}`);
-  await pause(1000);
   ui.say(`${cue.instruction} now`);
-  const shot = await captureStreamed(video, cue.frames, cue.duration_ms, 0.92, ui.progress);
+  // no countdown: up to duration_ms, ending as soon as the server sees the action
+  const shot = await captureStreamed(video, cue.frames, cue.duration_ms, 0.92, ui.progress, { challengeId: cue.id });
   ui.say("Checking");
   const r = await postForm("/api/admin/face/verify", framesForm([shot.lastBlob], {
     user_id: userId, challenge_id: cue.id, burst_id: shot.burstId, n_frames: shot.n }));
