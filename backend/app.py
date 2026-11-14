@@ -325,10 +325,88 @@ def audit(request: Request, limit: int = 200) -> dict:
 
 
 # ---------------------------------------------------------------- qualified roles
+@app.post("/api/admin/face/start")
+def admin_face_start(user_id: str = Form(...)) -> dict:
+    """Step 1 of staff sign-in: a random live cue bound to this user ID. (Issued for any ID so the
+    endpoint doesn't reveal who is staff; only a real staff member can pass the check.)"""
+    ch = sessions.new_challenge(user_id.strip(), user_id.strip())
+    return {"id": ch["id"], "action": ch["action"], "instruction": ch["instruction"],
+            "duration_ms": CFG["capture"]["challenge_duration_ms"], "frames": CFG["capture"]["challenge_frames"]}
+
+
+@app.post("/api/admin/face/verify")
+async def admin_face_verify(user_id: str = Form(...), challenge_id: str = Form(...), burst_id: str = Form(""),
+                            n_frames: int = Form(0), frames: list[UploadFile] = File(...)) -> dict:
+    jpegs = await _read(frames)
+    return await run_in_threadpool(_admin_face_check, user_id.strip(), challenge_id, burst_id, n_frames, jpegs)
+
+
+def _admin_face_check(user_id, challenge_id, burst_id, n_frames, jpegs) -> dict:
+    """1:1 face match against THIS user + liveness + the random cue, with a stricter threshold
+    than the kiosk. A pass yields a short-lived single-use token for the sign-in step."""
+    from pipeline.identity import identity_thresholds
+    ch = sessions.take_challenge(challenge_id)
+    if not ch or ch.get("claimed_id") != user_id:
+        raise HTTPException(410, "Face check expired - start again")
+    pre, _ = bursts.collect(burst_id, expected=max(0, n_frames - len(jpegs))) if burst_id else ([], 0.0)
+    offline = node.offline()
+    res = engine.analyse(jpegs, user_id, ch, pre_frames=pre,
+                         first_idx=(n_frames - len(jpegs)) if burst_id else None,
+                         provider_name="local_arcface" if offline else None)
+    ident, live = res.get("identity") or {}, res.get("liveness") or {}
+    th = identity_thresholds("local_arcface" if offline else None)
+    need = min(0.99, th["match"] + CFG["admin"]["face_margin"])
+    occ = res.get("occlusion") or {}
+    reasons = []
+    if not (res.get("challenge") or {}).get("passed"):
+        reasons.append(f"Live cue not detected ({ch['action'].replace('_', ' ')})")
+    if live.get("vetoes"):
+        reasons += live["vetoes"]
+    if (live.get("score") or 0) < CFG["liveness"]["allow"]:
+        reasons.append("Liveness too low")
+    if occ.get("sunglasses") or occ.get("mask"):
+        reasons.append("Remove sunglasses / face mask")
+    if ident.get("user_id") != user_id or (ident.get("similarity") or 0) < need:
+        reasons.append("Face does not match this user")
+    ok = not reasons and admin.is_staff(user_id)
+    if not ok and not reasons:
+        reasons.append("Face does not match this user")
+    if not ok:
+        admin._fail(user_id)
+    store.append_audit(node.KIOSK_ID, None, user_id, "ADMIN_FACE_OK" if ok else "ADMIN_FACE_FAIL", "admin",
+                       node.mode(), live.get("score"), ident.get("similarity"), None,
+                       ["Console face check passed"] if ok else reasons)
+    out = {"ok": ok, "reasons": reasons or ["Face verified"]}
+    if ok:
+        out["face_token"] = admin.issue_face_token(user_id)
+    return out
+
+
+@app.post("/api/admin/reauth")
+def admin_reauth(request: Request, face_token: str = Form(...)) -> dict:
+    if not admin.reauth(request.cookies.get("hid_admin"), face_token):
+        raise HTTPException(403, "Face re-check failed")
+    return {"ok": True}
+
+
+@app.post("/api/admin/recovery_codes")
+def admin_recovery_codes(request: Request) -> dict:
+    s = _sess(request)
+    if not s:
+        raise HTTPException(403, "Sign in first")
+    if not admin.recent_face(s):
+        raise HTTPException(401, "reauth_face")
+    codes = admin.new_recovery_codes(s["user_id"])
+    store.append_audit(node.KIOSK_ID, None, s["user_id"], "RECOVERY_CODES", "admin", node.mode(), None, None, None,
+                       ["New recovery codes issued (old ones invalidated)"])
+    return {"codes": codes}
+
+
 @app.post("/api/admin/login")
-def admin_login(user_id: str = Form(...), code: str = Form(...)):
+def admin_login(user_id: str = Form(...), code: str = Form(...), face_token: str = Form(""),
+                recovery_code: str = Form("")):
     from fastapi.responses import JSONResponse
-    token, msg = admin.login(user_id.strip(), code)
+    token, msg = admin.login(user_id.strip(), code, face_token or None, recovery_code or None)
     store.append_audit(node.KIOSK_ID, None, user_id.strip() or None, "ADMIN_SIGNIN" if token else "ADMIN_DENIED",
                        "admin", node.mode(), None, None, None, [msg])
     if not token:
@@ -356,6 +434,8 @@ def admin_me_for(s: dict | None) -> dict:
             "can_edit_policy": admin.allowed(s, "edit_policy") and node.ROLE != "edge",
             "can_view_audit": admin.allowed(s, "view_audit"),
             "can": {perm: admin.allowed(s, perm) for perm in admin.CAN},
+            "face_recent": admin.recent_face(s), "signed_in_via": s.get("via") if s else None,
+            "recovery_codes_left": store.recovery_codes_left(s["user_id"]) if s else 0,
             "edge": node.ROLE == "edge", "bootstrap": admin.bootstrap_open(), "roles": admin.ROLES}
 
 
@@ -374,18 +454,25 @@ def set_admin_role(request: Request, user_id: str, role: str = Form("")) -> dict
     first = admin.bootstrap_open() and role == "policy_admin"
     if not (admin.allowed(s, "edit_policy") or first):
         raise HTTPException(403, "Only a policy admin can grant or revoke admin roles")
+    if not first and not admin.recent_face(s):
+        raise HTTPException(401, "reauth_face")
     if not store.get_user(user_id).get("totp_secret"):
         raise HTTPException(400, "This person needs an authenticator app first (New QR on the Enroll page)")
     store.set_admin_role(user_id, role or None)
     by = s["user_id"] if s else "first-run setup"
     store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,
                        [f"{admin.ROLES.get(role, 'no admin role')} granted by {by}"])
-    return {"ok": True}
+    codes = admin.new_recovery_codes(user_id) if role else []
+    if not role:
+        store.set_recovery_codes(user_id, [])
+    return {"ok": True, "recovery_codes": codes}
 
 
 @app.put("/api/policy")
 def put_policy(request: Request, payload: dict = Body(...)) -> dict:
     s = _require(request, "edit_policy")
+    if not admin.recent_face(s):
+        raise HTTPException(401, "reauth_face")
     if node.ROLE == "edge":
         raise HTTPException(409, "This kiosk follows the central server's policy - edit it there")
     current = policy.load()

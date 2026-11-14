@@ -60,7 +60,7 @@
     </section>
   </main>
   <script type="module">
-    import { esc, framesForm, guard, halt, postForm, staffNav } from "../common.js";
+    import { esc, faceReauth, framesForm, guard, halt, postForm, staffNav } from "../common.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("policy");
     if (!guard(me, "view_policy")) await halt();
@@ -103,10 +103,12 @@
         document.querySelectorAll("select[data-sec]").forEach((sel) => (zone_security[sel.dataset.sec] = sel.value));
         const body = { windows, zone_security, grace_minutes: parseInt($("grace").value, 10),
           holidays: $("holidays").value.split(",").map((x) => x.trim()).filter(Boolean) };
-        const res = await fetch("/api/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const put = () => fetch("/api/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        let res = await put();
+        if (res.status === 401 && await faceReauth(me)) res = await put();  // sensitive change: fresh face check
         const out = await res.json().catch(() => ({}));
         if (!res.ok) {
-          $("editMsg").textContent = `Not saved: ${out.detail || res.status}`;
+          $("editMsg").textContent = `Not saved: ${out.detail === "reauth_face" ? "a fresh face check is required for this change" : out.detail || res.status}`;
           $("editMsg").style.color = "var(--deny)";
           return;
         }

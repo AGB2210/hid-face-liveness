@@ -6,8 +6,10 @@
 
 Everyone else (students, visitors) only ever sees the kiosk decision.
 
-Sign-in = enrolled user ID + a code from that person's authenticator app (something they have),
-giving a short admin session. Every sign-in, failure, grant and policy change is audited.
+Sign-in = enrolled user ID + a live face check (something you are, with a random cue) + a code
+from their authenticator app (something you have). Recovery codes stand in for the face check
+if a webcam fails. Policy edits and role grants need a face check from the last 5 minutes.
+Every sign-in, failure, grant and policy change is audited.
 """
 from __future__ import annotations
 
@@ -33,32 +35,102 @@ CAN = {
 }
 SESSION_S = 15 * 60
 MAX_FAILS, LOCK_S = 5, 300
+FACE_TOKEN_S = 120          # a passed face check must be used for sign-in within 2 minutes
+REAUTH_S = 5 * 60           # sensitive actions need a face check this recent
 
 _lock = threading.Lock()
 _sessions: dict[str, dict] = {}
 _fails: dict[str, list[float]] = {}
+_face_tokens: dict[str, dict] = {}
 
 
-def login(user_id: str, code: str) -> tuple[str | None, str]:
-    """Returns (session token, message)."""
-    now = time.time()
+def _locked_out(user_id: str, now: float) -> bool:
     with _lock:
         recent = [t for t in _fails.get(user_id, []) if now - t < LOCK_S]
         _fails[user_id] = recent
-        if len(recent) >= MAX_FAILS:
-            return None, "Too many failed attempts - try again in a few minutes"
+        return len(recent) >= MAX_FAILS
+
+
+def _fail(user_id: str) -> None:
+    with _lock:
+        _fails.setdefault(user_id, []).append(time.time())
+
+
+def is_staff(user_id: str) -> bool:
     u = store.get_user(user_id)
-    ok = bool(u and u.get("admin_role") in ROLES and u.get("totp_secret")
-              and pyotp.TOTP(u["totp_secret"]).verify(code.strip().replace(" ", ""), valid_window=1))
-    if not ok:
-        with _lock:
-            _fails.setdefault(user_id, []).append(now)
-        return None, "Not authorised: needs a staff role (policy admin, operator or auditor) and a valid authenticator code"
+    return bool(u and u.get("admin_role") in ROLES)
+
+
+# ------------------------------------------------------------------ factor 1: face + liveness
+def issue_face_token(user_id: str) -> str:
+    """Called after a passed 1:1 face + liveness + random-cue check for this user."""
+    t = secrets.token_urlsafe(24)
+    with _lock:
+        _face_tokens[t] = {"user_id": user_id, "expires": time.time() + FACE_TOKEN_S}
+    return t
+
+
+def take_face_token(token: str | None, user_id: str) -> bool:
+    """Single use, bound to the user it was issued for, short-lived."""
+    if not token:
+        return False
+    with _lock:
+        rec = _face_tokens.pop(token, None)
+    return bool(rec and rec["user_id"] == user_id and rec["expires"] >= time.time())
+
+
+# ------------------------------------------------------------------ factor 2: authenticator
+def _totp_ok(u: dict, code: str) -> bool:
+    return bool(u.get("totp_secret")) and pyotp.TOTP(u["totp_secret"]).verify(code.strip().replace(" ", ""), valid_window=1)
+
+
+def new_recovery_codes(user_id: str) -> list[str]:
+    """One-time codes that stand in for the face check if a webcam fails (shown once)."""
+    import hashlib
+    codes = ["-".join(secrets.token_hex(3) for _ in range(2)) for _ in range(8)]
+    store.set_recovery_codes(user_id, [hashlib.sha256(c.encode()).hexdigest() for c in codes])
+    return codes
+
+
+def login(user_id: str, code: str, face_token: str | None = None, recovery_code: str | None = None) -> tuple[str | None, str]:
+    """Staff sign-in = face check (or a one-time recovery code) + authenticator code.
+    Returns (session token, message)."""
+    import hashlib
+    now = time.time()
+    if _locked_out(user_id, now):
+        return None, "Too many failed attempts - try again in a few minutes"
+    u = store.get_user(user_id)
+    if not (u and u.get("admin_role") in ROLES and _totp_ok(u, code)):
+        _fail(user_id)
+        return None, "Not authorised: needs a staff role and a valid authenticator code"
+    via = None
+    if take_face_token(face_token, user_id):
+        via = "face"
+    elif recovery_code and store.use_recovery_code(user_id, hashlib.sha256(recovery_code.strip().lower().encode()).hexdigest()):
+        via = "recovery code"
+    if not via:
+        _fail(user_id)
+        return None, "Face check missing or expired - verify your face again (or use a recovery code)"
     token = secrets.token_urlsafe(32)
     with _lock:
         _fails.pop(user_id, None)
-        _sessions[token] = {"user_id": user_id, "role": u["admin_role"], "expires": now + SESSION_S}
-    return token, "Signed in"
+        _sessions[token] = {"user_id": user_id, "role": u["admin_role"], "expires": now + SESSION_S,
+                            "face_at": now if via == "face" else 0.0, "via": via}
+    return token, f"Signed in ({via} + authenticator)"
+
+
+def reauth(sess_token: str | None, face_token: str | None) -> bool:
+    """Refresh the 'recent face check' mark on a session (step-up before sensitive actions)."""
+    s = session(sess_token)
+    if not s or not take_face_token(face_token, s["user_id"]):
+        return False
+    with _lock:
+        _sessions[sess_token]["face_at"] = time.time()
+    return True
+
+
+def recent_face(sess: dict | None) -> bool:
+    return bool(sess) and time.time() - sess.get("face_at", 0) <= REAUTH_S
 
 
 def session(token: str | None) -> dict | None:

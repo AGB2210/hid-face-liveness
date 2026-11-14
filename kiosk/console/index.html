@@ -11,13 +11,36 @@
     <div class="signin-card">
       <div class="row" style="gap:12px"><span class="logo">HID</span><span class="brand">Staff console</span></div>
       <h1>Sign in</h1>
-      <p class="muted small" style="margin:0 0 26px">Enrollment, access policy, audit and evaluation. Authorised staff only.</p>
-      <form id="form" class="stack">
+      <ol class="steps" id="steps" style="margin:0 0 22px">
+        <li data-k="id" class="active">User ID</li><li data-k="face">Face check</li><li data-k="code">Code</li>
+      </ol>
+
+      <!-- step 1 -->
+      <form id="idForm" class="stack">
         <label>User ID <input id="uid" required autocomplete="username" autofocus /></label>
+        <button type="submit">Continue</button>
+      </form>
+
+      <!-- step 2 -->
+      <div id="faceStep" class="stack hidden">
+        <div class="cam small-cam" id="cam"><video id="video" playsinline muted></video><div class="guide"></div>
+          <div class="banner" id="banner">Starting camera</div><div class="progress" id="progress"></div></div>
+        <p class="small" id="faceMsg" style="margin:0;min-height:1.2em"></p>
+        <div class="row" style="justify-content:space-between">
+          <button class="secondary hidden" id="retry">Try again</button>
+          <a href="#" class="small muted" id="useRecovery">Can't use the camera? Use a recovery code</a>
+        </div>
+      </div>
+
+      <!-- step 3 -->
+      <form id="codeForm" class="stack hidden">
+        <p class="small" id="factor" style="margin:0"></p>
+        <label class="hidden" id="recoveryLabel">Recovery code <input id="recovery" autocomplete="off" placeholder="xxxxxx-xxxxxx" /></label>
         <label>Authenticator code <input id="code" required inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="6-digit code" /></label>
         <button type="submit" id="go">Sign in</button>
-        <p class="small" id="msg" style="margin:0;min-height:1.2em"></p>
       </form>
+      <p class="small" id="msg" style="margin:12px 0 0;min-height:1.2em"></p>
+
       <div class="setup hidden" id="setup">
         <b>First-run setup</b>
         <p class="small" style="margin:6px 0 12px">No policy admin exists yet. Enroll yourself, scan the QR code with an authenticator app,
@@ -25,7 +48,10 @@
         <a class="btn secondary-link" href="/console/enroll.html">Start setup</a>
       </div>
       <details class="small muted" style="margin-top:26px">
-        <summary>Who can do what</summary>
+        <summary>How staff sign-in works</summary>
+        <p>Three factors: your user ID, a live face check (liveness with a random blink or head-turn cue, matched only
+          against you), and a code from your authenticator app. Policy edits and role changes ask for a fresh face check.
+          Recovery codes replace the face check once each, if a webcam fails.</p>
         <table style="margin-top:10px">
           <tr><td>Policy admin</td><td>Everything, including editing the access schedule and granting roles</td></tr>
           <tr><td>Operator</td><td>Enroll people, record test clips, run the evaluation, kiosk demo controls</td></tr>
@@ -33,29 +59,91 @@
         </table>
       </details>
     </div>
-    <p class="small muted signin-foot">Every sign-in attempt is recorded in the audit log.</p>
+    <p class="small muted signin-foot">Every sign-in attempt and face check is recorded in the audit log.</p>
   </main>
   <script type="module">
-    import { framesForm, getMe, homeFor, postForm } from "../common.js";
+    import { faceCheck, framesForm, getMe, homeFor, postForm, startCamera } from "../common.js";
     const $ = (id) => document.getElementById(id);
     const next = new URLSearchParams(location.search).get("next");
     const dest = (me) => (next && next.startsWith("/console/") ? next : homeFor(me));
+    let userId = "", faceToken = "", stream = null;
 
     const me = await getMe();
     if (me.user_id) location.replace(dest(me));
     $("setup").classList.toggle("hidden", !me.bootstrap);
 
-    $("form").addEventListener("submit", async (e) => {
+    function step(k) {
+      const order = ["id", "face", "code"];
+      document.querySelectorAll("#steps li").forEach((li) => {
+        const i = order.indexOf(li.dataset.k), j = order.indexOf(k);
+        li.className = i < j ? "done" : i === j ? "active" : "";
+      });
+      $("idForm").classList.toggle("hidden", k !== "id");
+      $("faceStep").classList.toggle("hidden", k !== "face");
+      $("codeForm").classList.toggle("hidden", k !== "code");
+    }
+    const stopCamera = () => { stream?.getTracks().forEach((t) => t.stop()); stream = null; };
+
+    async function runFace() {
+      $("retry").classList.add("hidden");
+      $("faceMsg").textContent = "";
+      try {
+        stream ??= await startCamera($("video"), 640);
+        $("banner").textContent = "Look at the camera";
+        await new Promise((r) => setTimeout(r, 800));
+        const r = await faceCheck(userId, $("video"), {
+          say: (t) => ($("banner").textContent = t),
+          progress: (p) => ($("progress").style.width = `${p * 100}%`),
+          state: (c) => ($("cam").className = `cam small-cam ${c || ""}`),
+        });
+        if (r.ok) {
+          faceToken = r.face_token;
+          stopCamera();
+          $("factor").textContent = "Face verified. Now enter the code from your authenticator app.";
+          step("code");
+          $("code").focus();
+        } else {
+          $("faceMsg").textContent = r.reasons.join(". ");
+          $("faceMsg").style.color = "var(--deny)";
+          $("retry").classList.remove("hidden");
+        }
+      } catch (e) {
+        $("faceMsg").textContent = `Camera or check failed: ${e.message}`;
+        $("faceMsg").style.color = "var(--deny)";
+        $("retry").classList.remove("hidden");
+      }
+    }
+
+    $("idForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      userId = $("uid").value.trim();
+      if (!userId) return;
+      $("msg").textContent = "";
+      step("face");
+      runFace();
+    });
+    $("retry").addEventListener("click", runFace);
+    $("useRecovery").addEventListener("click", (e) => {
+      e.preventDefault();
+      stopCamera();
+      faceToken = "";
+      $("recoveryLabel").classList.remove("hidden");
+      $("factor").textContent = "Using a one-time recovery code instead of the face check.";
+      step("code");
+      $("recovery").focus();
+    });
+    $("codeForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       $("go").disabled = true;
       try {
-        const r = await postForm("/api/admin/login", framesForm([], { user_id: $("uid").value.trim(), code: $("code").value }));
+        const r = await postForm("/api/admin/login", framesForm([], {
+          user_id: userId, code: $("code").value, face_token: faceToken, recovery_code: $("recovery").value }));
         location.replace(dest(r));
       } catch (err) {
         $("msg").textContent = err.message;
         $("msg").style.color = "var(--deny)";
         $("code").value = "";
-        $("code").focus();
+        if (faceToken) { faceToken = ""; step("face"); runFace(); }  // a face token is single-use
       } finally {
         $("go").disabled = false;
       }

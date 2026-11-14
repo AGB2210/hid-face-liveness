@@ -65,6 +65,9 @@ glare:
   clean_frac: 0.004         # saturated-pixel fraction below this -> fine
   glare_frac: 0.04          # above this -> strong specular glare
 
+admin:
+  face_margin: 0.05         # console face check needs match threshold + this (stricter than the kiosk)
+
 occlusion:                  # accessories -> guidance (never a deny on their own)
   eye_dark_ratio: 0.45      # eye region / cheek brightness below this -> sunglasses
   lip_redness_min: -4.0     # lips not redder than own cheeks (Cr) ...

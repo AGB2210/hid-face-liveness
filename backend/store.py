@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, decision TEXT, stage TEXT,
   user_id TEXT, similarity REAL, liveness REAL, processing_ms REAL, total_ms REAL,
   reasons TEXT);
+CREATE TABLE IF NOT EXISTS recovery_codes (
+  user_id TEXT NOT NULL, hash TEXT NOT NULL, used REAL, PRIMARY KEY (user_id, hash));
 CREATE TABLE IF NOT EXISTS audit (
   id TEXT PRIMARY KEY, seq INTEGER, ts REAL, kiosk TEXT, zone TEXT, user_id TEXT, decision TEXT,
   stage TEXT, mode TEXT, liveness REAL, similarity REAL, schedule TEXT, reasons TEXT,
@@ -237,3 +239,24 @@ def audit_counts() -> dict:
     r = _db.execute("""SELECT SUM(synced=0 AND received IS NULL) pending,
                               SUM(mode='offline' AND received IS NULL) offline_total FROM audit""").fetchone()
     return {"pending": r["pending"] or 0, "offline_total": r["offline_total"] or 0}
+
+
+# ------------------------------------------------------------------ staff recovery codes
+def set_recovery_codes(user_id: str, hashes: list[str]) -> None:
+    """Replace a person's recovery codes (only SHA-256 hashes are stored)."""
+    with _lock:
+        _db.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+        _db.executemany("INSERT INTO recovery_codes (user_id, hash) VALUES (?,?)", [(user_id, h) for h in hashes])
+        _db.commit()
+
+
+def use_recovery_code(user_id: str, code_hash: str) -> bool:
+    with _lock:
+        cur = _db.execute("UPDATE recovery_codes SET used=? WHERE user_id=? AND hash=? AND used IS NULL",
+                          (time.time(), user_id, code_hash))
+        _db.commit()
+        return cur.rowcount == 1
+
+
+def recovery_codes_left(user_id: str) -> int:
+    return _db.execute("SELECT COUNT(*) FROM recovery_codes WHERE user_id=? AND used IS NULL", (user_id,)).fetchone()[0]

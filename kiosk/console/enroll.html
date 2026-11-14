@@ -60,7 +60,7 @@
     </div>
   </section>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, staffNav, startCamera } from "../common.js";
+    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, postWithReauth, showRecoveryCodes, staffNav, startCamera } from "../common.js";
     import { createTracker, hint, track } from "../facetrack.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("enroll");
@@ -96,8 +96,9 @@
       if (!tr) return;
       if (e.target.hasAttribute("data-admin")) {
         try {
-          await postForm(`/api/users/${encodeURIComponent(tr.dataset.id)}/admin_role`, framesForm([], { role: e.target.value }));
+          const r = await postWithReauth(me, `/api/users/${encodeURIComponent(tr.dataset.id)}/admin_role`, framesForm([], { role: e.target.value }));
           $("msg").textContent = `Admin role updated for ${tr.dataset.id}. Sign in at /console to use it.`;
+          if (r.recovery_codes?.length) showRecoveryCodes(r.recovery_codes, tr.dataset.id);
         } catch (err) { $("msg").textContent = `Not changed: ${err.message}`; }
         loadUsers();
         return;

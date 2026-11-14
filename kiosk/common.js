@@ -171,12 +171,19 @@ export async function staffNav(active) {
   const links = CONSOLE.filter(([k, , , perm]) => can[perm] || (k === "enroll" && me.bootstrap))
     .map(([k, href, label]) => `<a href="${href}"${k === active ? ' class="active"' : ""}>${label}</a>`).join("");
   const right = me.user_id
-    ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="/" target="_blank" rel="noopener">Kiosk ↗</a><a href="#" id="signOut">Sign out</a>`
+    ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="#" id="codesLink">Recovery codes</a><a href="/" target="_blank" rel="noopener">Kiosk ↗</a><a href="#" id="signOut">Sign out</a>`
     : `<a href="/console/">Sign in</a>`;
   const nav = document.getElementById("nav");
   if (nav) {
     nav.innerHTML = links + `<span class="navsep"></span>` + right;
     document.getElementById("signOut")?.addEventListener("click", (e) => { e.preventDefault(); signOut(); });
+    document.getElementById("codesLink")?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      try {
+        const r = await postWithReauth(me, "/api/admin/recovery_codes", framesForm([]));
+        showRecoveryCodes(r.codes, me.user_id);
+      } catch (err) { alert(`Not issued: ${err.message}`); }
+    });
   }
   return me;
 }
@@ -202,12 +209,102 @@ export function guard(me, permission, { firstRun = false } = {}) {
 
 export const halt = () => new Promise(() => {}); // stop a page script after guard()
 
-/** Kiosk header: nothing for the public; a quiet console link when staff are signed in. */
+/** Kiosk header: a Console button (leads to the staff sign-in; the console itself is locked),
+ *  plus who is signed in when staff are using the kiosk. */
 export async function kioskNav() {
   const me = await getMe();
   const nav = document.getElementById("nav");
-  if (nav && me.user_id) {
-    nav.innerHTML = `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="${homeFor(me)}">Console</a>`;
+  if (nav) {
+    const who = me.user_id ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span>` : "";
+    nav.innerHTML = `${who}<a class="console-btn" href="${me.user_id ? homeFor(me) : "/console/"}">Console</a>`;
   }
   return me;
+}
+
+/* ---------------------------------------------------------------- console face check */
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Live face check for a staff user: server-issued random cue, streamed capture, 1:1 match.
+ *  ui = { say(text), progress(0..1), state(cls) }. Resolves to { ok, face_token, reasons }. */
+export async function faceCheck(userId, video, ui) {
+  const cue = await postForm("/api/admin/face/start", framesForm([], { user_id: userId }));
+  ui.state?.("capturing");
+  ui.say(`Get ready: ${cue.instruction}`);
+  await pause(1000);
+  ui.say(`${cue.instruction} now`);
+  const shot = await captureStreamed(video, cue.frames, cue.duration_ms, 0.92, ui.progress);
+  ui.say("Checking");
+  const r = await postForm("/api/admin/face/verify", framesForm([shot.lastBlob], {
+    user_id: userId, challenge_id: cue.id, burst_id: shot.burstId, n_frames: shot.n }));
+  ui.state?.(r.ok ? "allow" : "deny");
+  ui.progress?.(0);
+  return r;
+}
+
+function modal(html) {
+  const el = document.createElement("div");
+  el.className = "modal";
+  el.innerHTML = `<div class="modal-box">${html}</div>`;
+  document.body.appendChild(el);
+  return el;
+}
+
+/** Re-verify the signed-in person's face (step-up before sensitive actions). Resolves true/false. */
+export async function faceReauth(me) {
+  const m = modal(`<h2>Confirm it's you</h2>
+    <p class="small muted" style="margin:0 0 14px">Sensitive change: a quick live face check is required.</p>
+    <div class="cam small-cam"><video playsinline muted></video><div class="guide"></div>
+      <div class="banner"></div><div class="progress"></div></div>
+    <div class="row" style="margin-top:14px;justify-content:space-between"><span class="small" data-msg></span>
+      <button class="secondary" data-cancel>Cancel</button></div>`);
+  const video = m.querySelector("video"), cam = m.querySelector(".cam"), msg = m.querySelector("[data-msg]");
+  let stream, cancelled = false;
+  m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); };
+  const close = () => { stream?.getTracks().forEach((t) => t.stop()); m.remove(); };
+  try {
+    stream = await startCamera(video, 640);
+    for (let attempt = 0; attempt < 2 && !cancelled; attempt++) {
+      const r = await faceCheck(me.user_id, video, {
+        say: (t) => (m.querySelector(".banner").textContent = t),
+        progress: (p) => (m.querySelector(".progress").style.width = `${p * 100}%`),
+        state: (c) => { cam.className = `cam small-cam ${c || ""}`; },
+      });
+      if (r.ok) {
+        await postForm("/api/admin/reauth", framesForm([], { face_token: r.face_token }));
+        close();
+        return true;
+      }
+      msg.textContent = r.reasons.join(". ");
+      msg.style.color = "var(--deny)";
+      await pause(1500);
+    }
+  } catch (e) {
+    msg.textContent = `Camera unavailable (${e.message}). Cancel, or sign in again with a recovery code.`;
+    msg.style.color = "var(--deny)";
+    await new Promise((r) => { m.querySelector("[data-cancel]").onclick = () => { cancelled = true; close(); r(); }; });
+    return false;
+  }
+  if (!cancelled) { await pause(1200); close(); }
+  return false;
+}
+
+/** Show one-time recovery codes once. */
+export function showRecoveryCodes(codes, who) {
+  const m = modal(`<h2>Recovery codes${who ? ` for ${esc(who)}` : ""}</h2>
+    <p class="small" style="margin:0 0 12px">Each code can replace the face check once (for example if a webcam fails).
+      Store them somewhere safe: they are shown only now.</p>
+    <pre class="codes">${codes.map(esc).join("\n")}</pre>
+    <div class="row" style="justify-content:flex-end;margin-top:14px"><button data-close>I've saved them</button></div>`);
+  m.querySelector("[data-close]").onclick = () => m.remove();
+}
+
+/** POST a form; if the server asks for a fresh face check, do it and retry once. */
+export async function postWithReauth(me, url, fd) {
+  try {
+    return await postForm(url, fd);
+  } catch (e) {
+    if (e.message !== "reauth_face") throw e;
+    if (!(await faceReauth(me))) throw new Error("a fresh face check is required for this change");
+    return postForm(url, fd);
+  }
 }
