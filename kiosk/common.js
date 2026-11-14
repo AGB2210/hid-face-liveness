@@ -243,6 +243,7 @@ export async function kioskNav() {
 
 /* ---------------------------------------------------------------- live cue (kiosk + console) */
 export const CUE_ICON = {
+  front: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="18"/><circle cx="17.5" cy="21" r="1.6" fill="currentColor"/><circle cx="30.5" cy="21" r="1.6" fill="currentColor"/><path d="M17 30c4 3 10 3 14 0"/></svg>',
   glasses: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="28" r="8"/><circle cx="35" cy="28" r="8"/><path d="M21 27c2-2 4-2 6 0M5 26 3 18M43 26l2-8"/><path d="M8 40 40 12" stroke-width="3"/></svg>',
   blink: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M4 24c5-8 12-12 20-12s15 4 20 12c-5 8-12 12-20 12S9 32 4 24z"/><circle cx="24" cy="24" r="6" fill="currentColor"/></svg>',
   turn_left: '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"><path d="M40 24H10M22 11 9 24l13 13"/></svg>',
@@ -308,13 +309,13 @@ export function cuePanel(cam) {
       hideT = setTimeout(api.hide, 700);
     },
     /** Big guidance (no capture), e.g. "take your glasses off". */
-    guide(title, text, icon) {
+    guide(title, text, icon, count = "") {
       reset();
-      el.className = "cue go guide";
+      el.className = `cue go guide ${icon || ""}`;  // a turn icon keeps its nudging animation
       q(".cue-icon").innerHTML = CUE_ICON[icon] || "";
       q(".cue-eyebrow").textContent = title;
       q(".cue-text").textContent = text;
-      q(".cue-count").textContent = "";
+      q(".cue-count").textContent = count;
       bar.style.transition = "none";
       bar.style.transform = "scaleX(0)";
       cam.classList.add("cueing");

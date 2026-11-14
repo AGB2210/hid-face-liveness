@@ -16,7 +16,6 @@
       <div class="cam" id="cam">
         <video id="video" playsinline muted></video>
         <div class="guide"></div>
-        <div class="instruction" id="instruction"></div>
         <div class="banner" id="banner">Starting camera</div>
         <div class="progress" id="progress"></div>
       </div>
@@ -61,7 +60,7 @@
     </div>
   </section>
   <script type="module">
-    import { captureBurst, deleteJSON, esc, framesForm, getConfig, guard, halt, postForm, postWithReauth, showRecoveryCodes, staffNav, startCamera, withReauth } from "../common.js";
+    import { captureBurst, cuePanel, deleteJSON, esc, framesForm, getConfig, guard, halt, postForm, postWithReauth, showRecoveryCodes, staffNav, startCamera, withReauth } from "../common.js";
     import { createTracker, hint, track } from "../facetrack.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("enroll");
@@ -126,11 +125,11 @@
 
     // ---------------------------------------------------------------- guided pose capture
     const BASE_STEPS = [
-      { k: "front", say: "Look straight at the camera", ok: (s) => Math.abs(s.yaw) < 8 },
-      { k: "left", say: "Slowly turn your head to your left", ok: (s) => s.yaw >= 15 && s.yaw <= 40 },
-      { k: "right", say: "Now turn your head to your right", ok: (s) => s.yaw <= -15 && s.yaw >= -40 },
+      { k: "front", icon: "front", say: "Look straight at the camera", ok: (s) => Math.abs(s.yaw) < 8 },
+      { k: "left", icon: "turn_left", say: "Slowly turn your head to your left", ok: (s) => s.yaw >= 15 && s.yaw <= 40 },
+      { k: "right", icon: "turn_right", say: "Now turn your head to your right", ok: (s) => s.yaw <= -15 && s.yaw >= -40 },
     ];
-    const BARE = { k: "bare", say: "Take off your glasses and look straight", ok: (s) => Math.abs(s.yaw) < 8, pause: 2500 };
+    const BARE = { k: "bare", icon: "glasses", say: "Take off your glasses and look straight", ok: (s) => Math.abs(s.yaw) < 8, pause: 2500 };
     let STEPS = BASE_STEPS;
     $("glasses").addEventListener("change", () => {
       STEPS = $("glasses").checked ? [...BASE_STEPS, BARE] : BASE_STEPS;
@@ -138,7 +137,9 @@
     });
     let tracker = null, latest = null;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const say = (t) => { $("instruction").textContent = t; $("instruction").style.display = t ? "block" : "none"; };
+    // same big cue panel as the kiosk: icon, instruction, step counter
+    const panel = cuePanel($("cam"));
+    const say = (t, icon, count = "") => (t ? panel.guide("Enrollment", t, icon, count) : panel.hide());
     function setStep(k, state) {
       document.querySelectorAll("#steps li").forEach((li) => {
         if (li.dataset.k === k) li.className = state;
@@ -175,7 +176,7 @@
       const blobs = [], labels = [];
       for (const [i, step] of STEPS.entries()) {
         STEPS.forEach((x, j) => setStep(x.k, j < i ? "done" : j === i ? "active" : ""));
-        say(`${i + 1} of ${STEPS.length} · ${step.say}`);
+        say(step.say, step.icon, `${i + 1}/${STEPS.length}`);
         if (step.pause) await sleep(step.pause);  // time to take the glasses off
         if (!(await waitForPose(step))) throw new Error(`Timed out waiting for: ${step.say.toLowerCase()}`);
         $("cam").classList.add("capturing");
@@ -192,7 +193,7 @@
 
     async function timedCapture() {
       // fallback when the in-browser tracker can't load: talk the person through a 3 s turn
-      say("Look straight, then slowly turn left and right");
+      say("Look straight, then slowly turn left and right", "front");
       $("cam").classList.add("capturing");
       const { blobs } = await captureBurst($("video"), 12, 3000, cfg.capture.jpeg_quality,
         (p) => ($("progress").style.width = `${p * 100}%`));
