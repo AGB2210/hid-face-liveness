@@ -254,6 +254,12 @@ header nav a.console-btn {
   color: var(--ink); font: 500 12.5px/1 var(--sans);
 }
 header nav a.console-btn:hover { border-color: var(--ink); }
+/* console -> kiosk, same look */
+.signin-card a.kiosk-btn {
+  margin-left: auto; padding: 7px 12px; border: 1px solid var(--line-strong); border-radius: 2px;
+  color: var(--ink); font: 500 12.5px/1 var(--sans); text-decoration: none;
+}
+.signin-card a.kiosk-btn:hover { border-color: var(--ink); }
 
 /* ---------- modal + face check ---------------------------------------------------------- */
 .modal { position: fixed; inset: 0; background: rgba(10, 10, 12, .55); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; }

@@ -171,11 +171,12 @@ export async function staffNav(active) {
   const links = CONSOLE.filter(([k, , , perm]) => can[perm] || (k === "enroll" && me.bootstrap))
     .map(([k, href, label]) => `<a href="${href}"${k === active ? ' class="active"' : ""}>${label}</a>`).join("");
   const right = me.user_id
-    ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="#" id="codesLink">Recovery codes</a><a href="/" target="_blank" rel="noopener">Kiosk ↗</a><a href="#" id="signOut">Sign out</a>`
+    ? `<span class="who">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</span><a href="#" id="codesLink">Recovery codes</a><a href="#" id="signOut">Sign out</a>`
     : `<a href="/console/">Sign in</a>`;
+  const kiosk = `<a class="console-btn" href="/">Kiosk</a>`;  // mirrors the kiosk's Console button
   const nav = document.getElementById("nav");
   if (nav) {
-    nav.innerHTML = links + `<span class="navsep"></span>` + right;
+    nav.innerHTML = links + `<span class="navsep"></span>` + right + kiosk;
     document.getElementById("signOut")?.addEventListener("click", (e) => { e.preventDefault(); signOut(); });
     document.getElementById("codesLink")?.addEventListener("click", async (e) => {
       e.preventDefault();
