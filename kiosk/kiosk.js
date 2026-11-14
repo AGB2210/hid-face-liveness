@@ -1,4 +1,4 @@
-import { captureBurst, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
+import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
@@ -10,26 +10,37 @@ function setCamState(state) {
   if (state) cam.classList.add(state);
 }
 
+const STATE = {
+  ALLOW: { cls: "allow", word: "Allow", note: "Access granted" },
+  DENY: { cls: "deny", word: "Deny", note: "Access denied" },
+  REQUEST_VERIFICATION: { cls: "verify", word: "Verify", note: "Additional verification required" },
+};
+
 function showDecision(res, totalMs) {
-  const cls = { ALLOW: "allow", DENY: "deny", REQUEST_VERIFICATION: "verify" }[res.decision] || "";
-  const label = { ALLOW: "✔ ALLOW", DENY: "✖ DENY", REQUEST_VERIFICATION: "⚠ VERIFY" }[res.decision] || "";
-  decisionEl.className = `decision ${cls}`;
-  const who = res.decision === "ALLOW" && res.identity?.name ? `<div class="who">Welcome, <b>${esc(res.identity.name)}</b></div>` : "";
+  const st = STATE[res.decision] || { cls: "", word: "", note: "" };
+  decisionEl.className = `decision ${st.cls}`;
   const t = res.timing_ms || {};
-  const metrics = totalMs
-    ? `<div class="metrics"><span>⏱ Decision time: <b>${(totalMs / 1000).toFixed(2)} s</b></span>${
-        res.confidence !== undefined ? `<span>Confidence: <b>${res.confidence.toFixed(2)}</b></span>` : ""}</div>
-       <div class="small muted">capture ${Math.round(res.capture_ms || 0)} ms · processing ${Math.round(t.processing || 0)} ms · network ${Math.max(0, Math.round(totalMs - (res.capture_ms || 0) - (t.processing || 0)))} ms</div>`
-    : "";
-  decisionEl.innerHTML = `<div class="big">${label}</div>${who}<div class="why">${esc((res.reasons || []).join(" · "))}</div>${metrics}`;
-  setCamState(cls);
+  const rows = [];
+  if (totalMs) rows.push(["Decision time", `${(totalMs / 1000).toFixed(2)} s`]);
+  if (res.confidence !== undefined) rows.push(["Confidence", res.confidence.toFixed(2)]);
+  if (res.identity?.name) rows.push(["Identity", esc(res.identity.name)]);
+  if (res.identity?.similarity !== undefined && res.identity?.user_id) rows.push(["Face match", res.identity.similarity.toFixed(2)]);
+  if (res.liveness?.score !== undefined) rows.push(["Liveness", res.liveness.score.toFixed(2)]);
+  const network = Math.max(0, Math.round(totalMs - (res.capture_ms || 0) - (t.processing || 0)));
+  decisionEl.innerHTML = `
+    <div class="eyebrow">${esc(st.note)}</div>
+    <div class="big">${st.word}</div>
+    <p class="why">${esc((res.reasons || []).join(". "))}</p>
+    ${rows.length ? `<dl class="readout">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
+    ${totalMs ? `<p class="breakdown">capture ${Math.round(res.capture_ms || 0)} ms · server ${Math.round(t.processing || 0)} ms · network ${network} ms</p>` : ""}`;
+  setCamState(st.cls);
   $("debug").innerHTML = renderDebug(res);
 }
 
-function idle(msg = "Look at the camera and press Start") {
-  decisionEl.className = "decision";
-  decisionEl.innerHTML = `<div class="big muted">READY</div><div class="why">${esc(msg)}</div>`;
-  banner.textContent = "Position your face inside the outline";
+function idle(msg = "Look at the camera and press Start.") {
+  decisionEl.className = "decision idle";
+  decisionEl.innerHTML = `<div class="eyebrow">Decision</div><div class="big">Ready</div><p class="why">${esc(msg)}</p>`;
+  banner.textContent = "Align your face within the frame";
   setCamState(null);
   instruction.style.display = "none";
   $("otpCard").classList.add("hidden");
@@ -45,7 +56,7 @@ async function burst(n, durationMs) {
   setCamState("capturing");
   progress.style.transition = "none";
   progress.style.width = "0";
-  const out = await captureBurst(video, n, durationMs, cfg.capture.jpeg_quality, (p) => {
+  const out = await captureStreamed(video, n, durationMs, cfg.capture.jpeg_quality, (p) => {
     progress.style.transition = "width .1s linear";
     progress.style.width = `${p * 100}%`;
   });
@@ -61,13 +72,15 @@ async function runCheck() {
   $("otpCard").classList.add("hidden");
   try {
     flowStart = performance.now();
-    banner.textContent = "Hold still…";
-    decisionEl.className = "decision";
-    decisionEl.innerHTML = `<div class="big muted">CHECKING…</div>`;
-    const { blobs, captureMs } = await burst(cfg.capture.frames, cfg.capture.duration_ms);
-    banner.textContent = "Analysing…";
+    banner.textContent = "Hold still";
+    decisionEl.className = "decision idle";
+    decisionEl.innerHTML = `<div class="eyebrow">Decision</div><div class="big">Checking</div><p class="why">Capturing and analysing.</p>`;
+    const shot = await burst(cfg.capture.frames, cfg.capture.duration_ms);
+    const captureMs = shot.captureMs;
+    banner.textContent = "Analysing";
     const t0 = performance.now() - captureMs;
-    const res = await postForm("/api/verify", framesForm(blobs, { claimed_id: $("claimed").value, capture_ms: captureMs }));
+    const res = await postForm("/api/verify", framesForm([shot.lastBlob], {
+      claimed_id: $("claimed").value, capture_ms: captureMs, burst_id: shot.burstId, n_frames: shot.n }));
     const total = performance.now() - t0;
     postForm("/api/timing", framesForm([], { total_ms: total })).catch(() => {});
     showDecision(res, total);
@@ -93,11 +106,13 @@ async function handleNext(res) {
     instruction.style.display = "block";
     await new Promise((r) => setTimeout(r, 900)); // time to read the instruction
     banner.textContent = ch.instruction;
-    const { blobs, captureMs } = await burst(ch.frames, ch.duration_ms);
+    const shot = await burst(ch.frames, ch.duration_ms);
+    const captureMs = shot.captureMs;
     instruction.style.display = "none";
-    banner.textContent = "Analysing…";
+    banner.textContent = "Analysing";
     const t0 = performance.now() - captureMs;
-    const res2 = await postForm("/api/verify", framesForm(blobs, { challenge_id: ch.id, capture_ms: captureMs }));
+    const res2 = await postForm("/api/verify", framesForm([shot.lastBlob], {
+      challenge_id: ch.id, capture_ms: captureMs, burst_id: shot.burstId, n_frames: shot.n }));
     showDecision(res2, performance.now() - t0);
     return handleNext(res2);
   }
@@ -142,13 +157,14 @@ async function refreshPhone() {
 async function loadUsers() {
   const users = await (await fetch("/api/users")).json();
   const sel = $("claimed");
-  sel.innerHTML = '<option value="">None - search by face (1:N)</option>' +
+  sel.innerHTML = '<option value="">None, search by face</option>' +
     users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("");
 }
 
 $("toggleDebug").addEventListener("click", () => {
   const hidden = $("debugCard").classList.toggle("hidden");
-  $("toggleDebug").textContent = hidden ? "Show details" : "Hide details";
+  $("toggleDebug").textContent = hidden ? "Signals" : "Hide signals";
+  if (!hidden) $("debugCard").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 startBtn.addEventListener("click", runCheck);
 document.addEventListener("keydown", (e) => {

@@ -5,17 +5,23 @@ Then open http://localhost:8000
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import secrets
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
+from fastapi.concurrency import run_in_threadpool  # noqa: E402
+from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+import bursts  # noqa: E402
 import sessions  # noqa: E402
 import store  # noqa: E402
 from pipeline import engine  # noqa: E402
@@ -28,6 +34,39 @@ LABELS = ["live", "print", "screen_photo", "video_replay", "mask"]
 CLIPS = DATA / "clips"
 
 app = FastAPI(title="HID Liveness Kiosk")
+PASSWORD = os.environ.get("HID_PASSWORD")  # set on the public deployment
+AUTH_TOKEN = hashlib.sha256(f"hid:{PASSWORD}".encode()).hexdigest() if PASSWORD else ""
+LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>HID Kiosk Login</title>
+<link rel="stylesheet" href="/styles.css"></head><body><main style="max-width:380px;margin:12vh auto">
+<div class="card stack"><div class="row"><span class="logo">HID</span><h1 style="margin:0;font-size:18px">Liveness Kiosk</h1></div>
+<form method="post" action="/login" class="stack"><label>Access password
+<input type="password" name="password" autofocus required></label>
+<button type="submit">Enter</button>{msg}</form></div></main></body></html>"""
+
+
+@app.middleware("http")
+async def access_gate(request: Request, call_next):
+    """Simple shared-password gate for the public deployment (HID_PASSWORD)."""
+    path = request.url.path
+    if PASSWORD and path not in ("/login", "/styles.css") and             not secrets.compare_digest(request.cookies.get("hid_auth", ""), AUTH_TOKEN):
+        if path.startswith("/api/"):
+            return Response('{"detail":"login required"}', status_code=401, media_type="application/json")
+        return HTMLResponse(LOGIN_HTML.format(msg=""), status_code=401)
+    response = await call_next(request)
+    # pages/scripts change with every update: make browsers revalidate instead of reusing stale copies
+    response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+@app.post("/login")
+def login(password: str = Form(...)):
+    if not PASSWORD or not secrets.compare_digest(password, PASSWORD):
+        return HTMLResponse(LOGIN_HTML.format(msg='<p class="small" style="color:var(--deny)">Wrong password</p>'),
+                            status_code=401)
+    r = RedirectResponse("/", status_code=303)
+    r.set_cookie("hid_auth", AUTH_TOKEN, max_age=7 * 24 * 3600, httponly=True, samesite="lax")
+    return r
 
 
 @app.on_event("startup")
@@ -87,8 +126,28 @@ async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = F
 
 @app.post("/api/verify")
 async def verify(frames: list[UploadFile] = File(...), claimed_id: str = Form(""),
-                 challenge_id: str = Form(""), capture_ms: float = Form(0)) -> dict:
+                 challenge_id: str = Form(""), capture_ms: float = Form(0),
+                 burst_id: str = Form(""), n_frames: int = Form(0)) -> dict:
+    """frames: the whole burst, or (streaming) just the last frame(s) with burst_id set
+    and n_frames = total frames in the burst."""
     jpegs = await _read(frames)
+    return await run_in_threadpool(_verify, jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames)
+
+
+@app.post("/api/burst/{burst_id}/frame")
+async def burst_frame(burst_id: str, idx: int = Form(...), frame: UploadFile = File(...)) -> dict:
+    """Streaming capture: one frame, analysed as soon as it arrives."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", burst_id):
+        raise HTTPException(400, "bad burst id")
+    return await run_in_threadpool(bursts.add_frame, burst_id, idx, await frame.read())
+
+
+def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames) -> dict:
+    pre, pre_ms = [], 0.0
+    if burst_id:
+        if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", burst_id):
+            raise HTTPException(400, "bad burst id")
+        pre, pre_ms = bursts.collect(burst_id, expected=max(0, n_frames - len(jpegs)))
     challenge = None
     if challenge_id:
         challenge = sessions.take_challenge(challenge_id)
@@ -96,9 +155,13 @@ async def verify(frames: list[UploadFile] = File(...), claimed_id: str = Form(""
             raise HTTPException(410, "Challenge expired or already used - start again")
         claimed_id = claimed_id or challenge.get("claimed_id") or ""
 
-    res = engine.analyse(jpegs, claimed_id or None, challenge)
+    res = engine.analyse(jpegs, claimed_id or None, challenge, pre_frames=pre,
+                         first_idx=(n_frames - len(jpegs)) if burst_id else None)
     res["stage"] = "challenge" if challenge else "passive"
     res["capture_ms"] = capture_ms
+    if burst_id:
+        res["timing_ms"]["streamed_frames"] = len(pre)
+        res["timing_ms"]["analysed_during_capture"] = round(pre_ms, 1)
 
     if res["decision"] == engine.VERIFY and res["next"] == "challenge":
         cand = res["identity"]["user_id"] if res.get("identity") else None

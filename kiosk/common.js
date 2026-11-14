@@ -36,6 +36,38 @@ export async function captureBurst(video, n, durationMs, quality = 0.92, onProgr
   return { blobs, captureMs: performance.now() - t0 };
 }
 
+/** Like captureBurst, but uploads frames 0..n-2 to the server *while* capturing, so the
+ *  network time overlaps with the capture. The last frame is returned for the verify call. */
+export async function captureStreamed(video, n, durationMs, quality = 0.92, onProgress) {
+  const burstId = crypto.randomUUID();
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+  const step = durationMs / Math.max(1, n - 1);
+  const t0 = performance.now();
+  const uploads = [];
+  let last = null;
+  for (let i = 0; i < n; i++) {
+    await sleepUntil(t0 + i * step);
+    ctx.drawImage(video, 0, 0);
+    const blob = new Promise((r) => canvas.toBlob(r, "image/jpeg", quality));
+    if (i < n - 1) {
+      uploads.push(blob.then((b) => {
+        const fd = new FormData();
+        fd.append("idx", i);
+        fd.append("frame", b, `f${i}.jpg`);
+        return fetch(`/api/burst/${burstId}/frame`, { method: "POST", body: fd }).then((r) => r.ok).catch(() => false);
+      }));
+    } else {
+      last = blob;
+    }
+    onProgress?.((i + 1) / n);
+  }
+  const lastBlob = await last;
+  return { burstId, lastBlob, captureMs: performance.now() - t0, n, uploads };
+}
+
 export function framesForm(blobs, fields = {}) {
   const fd = new FormData();
   blobs.forEach((b, i) => fd.append("frames", b, `f${i}.jpg`));

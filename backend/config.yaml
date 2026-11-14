@@ -72,3 +72,12 @@ challenge:
   pass_bonus: 0.15          # liveness bonus when the random action is performed on cue
   max_otp_tries: 3
   otp_digits: 6
+
+# Overrides applied when HID_PROFILE is set (the AWS deployment uses "cloud").
+profiles:
+  cloud:
+    capture:
+      width: 640          # smaller frames -> faster upload over the internet
+      jpeg_quality: 0.85
+    quality:
+      min_face_px: 90     # scaled for 640-px frames

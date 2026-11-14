@@ -6,6 +6,6 @@ mediapipe
 onnxruntime
 numpy
 pyyaml
-boto3
+boto3[crt]
 # only needed once, for scripts/export_minifas_onnx.py:
 # torch onnx  (pip install torch onnx --index-url https://download.pytorch.org/whl/cpu)

@@ -69,12 +69,18 @@ def action_done(frames: list[Frame], action: str) -> tuple[bool, dict]:
 
 
 def analyse(jpegs: list[bytes], claimed_id: str | None = None,
-            challenge: dict | None = None) -> dict:
+            challenge: dict | None = None, pre_frames: list[Frame] | None = None,
+            first_idx: int | None = None) -> dict:
+    """pre_frames: frames already analysed while the burst was still being captured
+    (streaming upload). jpegs are the remaining frames, numbered from first_idx."""
+    pre_frames = pre_frames or []
+    start = len(pre_frames) if first_idx is None else first_idx
     t0 = time.perf_counter()
     imgs = decode(jpegs)
     t_dec = time.perf_counter()
     with models_lock():
-        frames = [analyse_frame(i, im) for i, im in enumerate(imgs)]
+        new = [analyse_frame(start + i, im) for i, im in enumerate(imgs)]
+        frames = sorted(pre_frames + new, key=lambda f: f.idx)
         t_frames = time.perf_counter()
 
         face_frames = [f for f in frames if f.box is not None and f.mesh is not None]
