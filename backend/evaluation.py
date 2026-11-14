@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+import vault
 from pipeline import engine
 from pipeline.config import CFG, DATA
 from pipeline.identity import identity_thresholds
@@ -63,7 +64,7 @@ def find_clips(root: Path) -> list[Path]:
 
 def run_clip(meta_path: Path) -> dict:
     meta = json.loads(meta_path.read_text())
-    frames = [p.read_bytes() for p in sorted(meta_path.parent.glob("frame_*.jpg"))]
+    frames = [vault.read_file(p) for p in sorted(meta_path.parent.glob("frame_*.jpg*"))]
     res = engine.analyse(frames, None, None)
     live = res.get("liveness") or {}
     ident = res.get("identity") or {}

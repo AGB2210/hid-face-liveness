@@ -18,16 +18,18 @@ import urllib.request
 
 import policy
 import store
+import vault
 
 ROLE = os.environ.get("HID_NODE", "standalone")
 KIOSK_ID = os.environ.get("HID_KIOSK_ID") or f"kiosk-{socket.gethostname().lower()}"
 CENTRAL = (os.environ.get("HID_CENTRAL_URL") or "").rstrip("/")
 SYNC_KEY = os.environ.get("HID_SYNC_KEY", "")
 INTERVAL_S = 4
+PEOPLE_INTERVAL_S = 30   # how often an online edge refreshes its copy of central's enrolled people
 
 STATE = {"online": True, "simulated_offline": False, "last_ok": None, "last_check": None,
          "offline_since": None, "last_sync": None, "last_reconnect_synced": 0,
-         "policy_pulled": None, "error": None}
+         "policy_pulled": None, "people_pulled": None, "people": None, "error": None}
 _lock = threading.Lock()
 
 
@@ -78,14 +80,15 @@ def _set_online(ok: bool, err: str | None) -> None:
         STATE["last_ok"] = time.time()
         if was_offline:
             STATE["offline_since"] = None
-            n = sync_once()
+            n = sync_once(refresh_people=True)
             STATE["last_reconnect_synced"] = n
     elif STATE["offline_since"] is None:
         STATE["offline_since"] = time.time()
 
 
-def sync_once() -> int:
-    """Push pending audit records, pull the latest policy. Returns records pushed."""
+def sync_once(refresh_people: bool = False) -> int:
+    """Push pending audit records, pull the latest policy and (every PEOPLE_INTERVAL_S, or when
+    asked) the enrolled people. Returns records pushed."""
     if offline() or not has_central():
         return 0
     with _lock:
@@ -106,7 +109,22 @@ def sync_once() -> int:
             STATE["last_sync"] = time.time()
         except Exception as e:
             STATE["error"] = f"sync: {type(e).__name__}: {e}"[:160]
+        due = not STATE["people_pulled"] or time.time() - STATE["people_pulled"] >= PEOPLE_INTERVAL_S
+        if refresh_people or due:
+            pull_people()
         return pushed
+
+
+def pull_people() -> None:
+    """Copy everyone enrolled on central (details, authenticator secret, face templates - no
+    photos), so this kiosk can still recognise them when the connection drops."""
+    try:
+        res = _call("/api/sync/people", timeout=15)
+        people = json.loads(vault.open_from_sync(res["sealed"]))
+        r = store.mirror_people(people)
+        STATE["people_pulled"], STATE["people"] = time.time(), r["people"]
+    except Exception as e:
+        STATE["error"] = f"people sync: {type(e).__name__}: {e}"[:160]
 
 
 def _loop() -> None:
@@ -136,4 +154,5 @@ def status() -> dict:
             "last_ok": STATE["last_ok"], "last_sync": STATE["last_sync"],
             "pending": c["pending"] if has_central() else 0, "offline_decisions": c["offline_total"],
             "last_reconnect_synced": STATE["last_reconnect_synced"],
+            "people_synced": STATE["people"], "people_pulled": STATE["people_pulled"],
             "policy_source": current_policy().get("_source"), "error": STATE["error"]}

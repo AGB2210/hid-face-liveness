@@ -1,8 +1,10 @@
 """SQLite storage: enrolled users, face templates, attempt log and the tamper-evident audit log.
 
+Face templates, authenticator secrets and phone numbers are encrypted at rest (see vault.py).
 The audit log never contains images or face templates - only decision metadata."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sqlite3
@@ -12,6 +14,7 @@ import time
 
 import numpy as np
 
+import vault
 from pipeline.config import DATA
 
 DB_PATH = DATA / "hid.db"
@@ -44,13 +47,48 @@ CREATE TABLE IF NOT EXISTS audit (
   stage TEXT, mode TEXT, liveness REAL, similarity REAL, schedule TEXT, reasons TEXT,
   prev_hash TEXT, hash TEXT, synced INTEGER DEFAULT 0, received REAL);
 """)
-for _col in ("role", "valid_until", "totp_secret", "admin_role", "email"):
+for _col in ("role", "valid_until", "totp_secret", "admin_role", "email", "source"):  # source='central': mirrored
     if _col not in [r["name"] for r in _db.execute("PRAGMA table_info(users)")]:
         _db.execute(f"ALTER TABLE users ADD COLUMN {_col} TEXT")
 # one admin role now: former policy admins become admins; the old operator/auditor roles are gone
 _db.execute("UPDATE users SET role='admin' WHERE admin_role='policy_admin'")
 _db.execute("UPDATE users SET admin_role=NULL WHERE admin_role IS NOT NULL")
 _db.commit()
+
+ENCRYPTED_USER_FIELDS = ("phone", "totp_secret")
+
+
+def _encrypt_existing() -> None:
+    """Startup: check the key opens the stored data, then encrypt anything still in plaintext
+    (data written before encryption was added). Safe to run every time."""
+    sample = _db.execute("SELECT emb FROM templates LIMIT 1").fetchone()
+    vault.check(sample["emb"] if sample else None)
+    sample = _db.execute("SELECT totp_secret FROM users WHERE totp_secret IS NOT NULL LIMIT 1").fetchone()
+    vault.check(sample["totp_secret"] if sample else None)
+    for r in _db.execute("SELECT id, emb FROM templates").fetchall():
+        if not vault.is_token(r["emb"]):
+            _db.execute("UPDATE templates SET emb=? WHERE id=?", (vault.enc(r["emb"]), r["id"]))
+    for r in _db.execute("SELECT id, phone, totp_secret FROM users").fetchall():
+        for col in ENCRYPTED_USER_FIELDS:
+            if r[col] is not None and not vault.is_token(r[col]):
+                _db.execute(f"UPDATE users SET {col}=? WHERE id=?", (vault.enc_str(r[col]), r["id"]))
+    _db.commit()
+    # face crops and recorded test clips on disk
+    vault.encrypt_tree(DATA / "enroll")
+    vault.encrypt_tree(DATA / "clips")
+
+
+def _user(r) -> dict | None:
+    if r is None:
+        return None
+    u = dict(r)
+    for col in ENCRYPTED_USER_FIELDS:
+        if col in u:
+            u[col] = vault.dec_str(u[col])
+    return u
+
+
+_encrypt_existing()
 
 AUDIT_FIELDS = ("id", "seq", "ts", "kiosk", "zone", "user_id", "decision", "stage", "mode",
                 "liveness", "similarity", "schedule", "reasons", "prev_hash")
@@ -60,10 +98,10 @@ def upsert_user(user_id: str, name: str, phone: str | None, embs: np.ndarray) ->
     with _lock:
         _db.execute("""INSERT INTO users (id, name, phone, created) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE
                        SET name=excluded.name, phone=excluded.phone, created=excluded.created""",
-                    (user_id, name, phone, time.time()))
+                    (user_id, name, vault.enc_str(phone), time.time()))
         _db.execute("DELETE FROM templates WHERE user_id=?", (user_id,))
         _db.executemany("INSERT INTO templates (user_id, emb) VALUES (?,?)",
-                        [(user_id, e.astype(np.float32).tobytes()) for e in embs])
+                        [(user_id, vault.enc(e.astype(np.float32).tobytes())) for e in embs])
         _db.commit()
 
 
@@ -71,8 +109,46 @@ def upsert_user_meta(user_id: str, name: str, phone: str | None) -> None:
     """Create/update a user without touching local templates (remote providers)."""
     with _lock:
         _db.execute("""INSERT INTO users (id, name, phone, created) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE
-                       SET name=excluded.name, phone=excluded.phone""", (user_id, name, phone, time.time()))
+                       SET name=excluded.name, phone=excluded.phone""", (user_id, name, vault.enc_str(phone), time.time()))
         _db.commit()
+
+
+# ------------------------------------------------------------------ people sync (central -> edge)
+PEOPLE_FIELDS = ("id", "name", "phone", "email", "role", "valid_until", "created", "totp_secret")
+
+
+def export_people() -> list[dict]:
+    """Central: everyone an edge kiosk needs to decide offline - details, authenticator secret
+    and on-device face templates. No photos. Encrypted for transport by the caller."""
+    tpl = {}
+    for r in _db.execute("SELECT user_id, emb FROM templates ORDER BY id"):
+        tpl.setdefault(r["user_id"], []).append(base64.b64encode(vault.dec(r["emb"])).decode())
+    rows = _db.execute(f"SELECT {', '.join(PEOPLE_FIELDS)} FROM users").fetchall()
+    return [{**_user(r), "templates": tpl.get(r["id"], [])} for r in rows]
+
+
+def mirror_people(people: list[dict]) -> dict:
+    """Edge: make the local copy of central's people match exactly. People enrolled on this
+    kiosk itself are left alone; central wins if the same ID exists in both."""
+    incoming = {p["id"]: p for p in people}
+    with _lock:
+        mirrored = {r["id"] for r in _db.execute("SELECT id FROM users WHERE source='central'")}
+        removed = mirrored - set(incoming)
+        for uid in removed:
+            _db.execute("DELETE FROM templates WHERE user_id=?", (uid,))
+            _db.execute("DELETE FROM users WHERE id=?", (uid,))
+        for uid, p in incoming.items():
+            _db.execute("""INSERT INTO users (id, name, phone, email, role, valid_until, created, totp_secret, source)
+                           VALUES (?,?,?,?,?,?,?,?, 'central') ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                           phone=excluded.phone, email=excluded.email, role=excluded.role, valid_until=excluded.valid_until,
+                           created=excluded.created, totp_secret=excluded.totp_secret, source='central'""",
+                        (uid, p["name"], vault.enc_str(p.get("phone")), p.get("email"), p.get("role"),
+                         p.get("valid_until"), p.get("created"), vault.enc_str(p.get("totp_secret"))))
+            _db.execute("DELETE FROM templates WHERE user_id=?", (uid,))
+            _db.executemany("INSERT INTO templates (user_id, emb) VALUES (?,?)",
+                            [(uid, vault.enc(base64.b64decode(t))) for t in p.get("templates", [])])
+        _db.commit()
+    return {"people": len(incoming), "removed": len(removed)}
 
 
 def set_rek_faces(user_id: str, collection: str, face_ids: list[str]) -> None:
@@ -106,18 +182,17 @@ def list_users() -> list[dict]:
                             (SELECT COUNT(*) FROM templates t WHERE t.user_id=u.id) n,
                             (SELECT COUNT(*) FROM rek_faces r WHERE r.user_id=u.id) n_rekognition
                           FROM users u ORDER BY u.created""").fetchall()
-    return [dict(r) for r in rows]
+    return [_user(r) for r in rows]
 
 
 def get_user(user_id: str) -> dict | None:
-    r = _db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    return dict(r) if r else None
+    return _user(_db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone())
 
 
 def templates() -> dict[str, np.ndarray]:
     out: dict[str, list] = {}
     for r in _db.execute("SELECT user_id, emb FROM templates"):
-        out.setdefault(r["user_id"], []).append(np.frombuffer(r["emb"], np.float32))
+        out.setdefault(r["user_id"], []).append(np.frombuffer(vault.dec(r["emb"]), np.float32))
     return {k: np.stack(v) for k, v in out.items()}
 
 
@@ -155,8 +230,7 @@ def normalise_email(email: str | None) -> str | None:
 
 
 def get_user_by_email(email: str) -> dict | None:
-    r = _db.execute("SELECT * FROM users WHERE email=?", (normalise_email(email),)).fetchone()
-    return dict(r) if r else None
+    return _user(_db.execute("SELECT * FROM users WHERE email=?", (normalise_email(email),)).fetchone())
 
 
 def set_email(user_id: str, email: str | None) -> None:
@@ -167,7 +241,7 @@ def set_email(user_id: str, email: str | None) -> None:
 
 def set_totp(user_id: str, secret: str | None) -> None:
     with _lock:
-        _db.execute("UPDATE users SET totp_secret=? WHERE id=?", (secret, user_id))
+        _db.execute("UPDATE users SET totp_secret=? WHERE id=?", (vault.enc_str(secret), user_id))
         _db.commit()
 
 

@@ -111,6 +111,8 @@ HID_SYNC_KEY={sync_key}
 AWS_DEFAULT_REGION={REGION}
 GLOG_minloglevel=2
 ENV
+# data-encryption key: made on the server, kept outside the data folder, never leaves the instance
+grep -q '^HID_DATA_KEY=' /etc/hid-kiosk.env || echo "HID_DATA_KEY=$(python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" >> /etc/hid-kiosk.env
 chmod 600 /etc/hid-kiosk.env
 cat > /etc/systemd/system/hid-kiosk.service <<'UNIT'
 [Unit]
@@ -134,6 +136,8 @@ UPDATE_SCRIPT = """set -e
 apt-get install -y -q libegl1 libgles2 > /dev/null 2>&1 || true
 grep -q '^HID_NODE=' /etc/hid-kiosk.env || echo 'HID_NODE=central' >> /etc/hid-kiosk.env
 grep -q '^HID_SYNC_KEY=' /etc/hid-kiosk.env || echo 'HID_SYNC_KEY={sync_key}' >> /etc/hid-kiosk.env
+grep -q '^HID_DATA_KEY=' /etc/hid-kiosk.env || echo "HID_DATA_KEY=$(python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" >> /etc/hid-kiosk.env
+chmod 600 /etc/hid-kiosk.env
 cd /opt/hid
 curl -fsSL '{url}' -o /tmp/code.tar.gz
 tar xzf /tmp/code.tar.gz -C /opt/hid
@@ -235,7 +239,7 @@ def launch(st: dict, urls: dict) -> str:
             args = dict(ImageId=ami, InstanceType=itype, MinCount=1, MaxCount=1, UserData=ud,
                         SecurityGroupIds=[st["sg"]],
                         BlockDeviceMappings=[{"DeviceName": "/dev/sda1",
-                                              "Ebs": {"VolumeSize": 30, "VolumeType": "gp3"}}],
+                                              "Ebs": {"VolumeSize": 30, "VolumeType": "gp3", "Encrypted": True}}],
                         MetadataOptions={"HttpTokens": "required"},
                         TagSpecifications=[{"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": NAME}]}])
             if st.get("role_ok"):

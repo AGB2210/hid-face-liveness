@@ -40,15 +40,21 @@ def face_jpeg(f: Frame, margin: float = 0.4, max_side: int = 640) -> bytes:
 
 
 def save_enrollment_crops(user_id: str, frames: list[Frame]) -> list[bytes]:
-    """Keep the enrollment face crops locally so users can be re-indexed into another
-    provider later (scripts/sync_rekognition.py) without re-enrolling."""
+    """Keep the enrollment face crops locally (encrypted) so users can be re-indexed into
+    another provider later (scripts/sync_rekognition.py) without re-enrolling."""
+    import vault
     d = ENROLL_DIR / user_id
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True, exist_ok=True)
     crops = [face_jpeg(f) for f in frames]
     for i, b in enumerate(crops):
-        (d / f"{i:02d}.jpg").write_bytes(b)
+        vault.write_file(d / f"{i:02d}.jpg", b)
     return crops
+
+
+def load_enrollment_crops(user_id: str) -> list[bytes]:
+    import vault
+    return [vault.read_file(p) for p in sorted((ENROLL_DIR / user_id).glob("*.jpg*"))]
 
 
 def delete_enrollment_crops(user_id: str) -> None:

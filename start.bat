@@ -35,12 +35,13 @@ if not defined BASEPY (
 %BASEPY% -m venv "%VENV%" || goto :fail
 :have_venv
 
-rem ---------- 2. Python packages (first run, or after deleting .venv\.installed) ----------
-if exist "%VENV%\.installed" goto :have_packages
-echo [setup] Installing Python packages (first run, a few minutes)...
-"%PY%" -m pip install --upgrade pip -q || goto :fail
+rem ---------- 2. Python packages (first run, or when requirements.txt changes) ----------
+rem .venv\.installed holds a copy of the requirements last installed; no internet needed when unchanged
+fc /b requirements.txt "%VENV%\.installed" >nul 2>&1 && goto :have_packages
+echo [setup] Installing Python packages (first run or new requirements, a few minutes)...
+"%PY%" -m pip install --upgrade pip -q
 "%PY%" -m pip install -r requirements.txt -q || goto :fail
-echo ok> "%VENV%\.installed"
+copy /y requirements.txt "%VENV%\.installed" >nul
 :have_packages
 
 rem ---------- 3. Pretrained models (skips files already downloaded) ----------

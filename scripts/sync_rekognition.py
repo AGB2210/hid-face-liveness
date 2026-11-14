@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import store  # noqa: E402
-from pipeline.identity import ENROLL_DIR  # noqa: E402
+from pipeline.identity import load_enrollment_crops  # noqa: E402
 from pipeline.identity_rekognition import Rekognition  # noqa: E402
 
 
@@ -30,7 +30,7 @@ def main() -> int:
     if not users:
         print("Nobody enrolled yet.")
     for u in users:
-        crops = [p.read_bytes() for p in sorted((ENROLL_DIR / u["id"]).glob("*.jpg"))]
+        crops = load_enrollment_crops(u["id"])
         if not crops:
             print(f"skip  {u['id']}: no saved face crops - re-enroll this user")
             continue

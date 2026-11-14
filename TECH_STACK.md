@@ -31,10 +31,26 @@
 |---|---|---|
 | Context-aware access | YAML campus schedule (roles × zones × weekly windows, grace, holidays, expiry) | `backend/access_policy.yaml`, timezone-aware (`zoneinfo` + `tzdata`) |
 | Second factor | TOTP authenticator app (`pyotp`, QR via `qrcode`), mock SMS OTP | TOTP works offline |
-| Offline fail-safe | Edge/central roles, health monitor, on-device templates, mandatory cue + TOTP | Never fails open; high-security zones close offline |
+| Offline fail-safe | Edge/central roles, health monitor every 4 s, on-device templates, mandatory cue + TOTP | Never fails open; high-security zones close offline |
+| People sync (central → edge) | `/api/sync/people`, refreshed every 30 s and on reconnect | Edge keeps an encrypted copy of everyone enrolled on central: details, TOTP secret, ArcFace templates (no photos). Removals propagate. |
 | Audit log | SQLite, SHA-256 hash chain per kiosk, idempotent sync | No images or face templates stored in audit |
-| Access to the site | Shared-password login (HTTP-only cookie) | Sync API uses a separate shared key header |
+| Access to the site | Shared-password login (HTTP-only cookie) | Sync API uses a separate shared key header (constant-time compare) |
 | Data storage | SQLite (`data/hid.db`) | Users, templates, attempts, audit |
+
+## Encryption
+
+| What | Method | Key |
+|---|---|---|
+| At rest: face templates, enrollment face photos, recorded test clips, TOTP secrets, phone numbers | **Fernet** from the `cryptography` library (AES-128-CBC + HMAC-SHA256, authenticated) in `backend/vault.py` | One random 256-bit data key per node, never stored with the data |
+| Key on a Windows kiosk | **Windows DPAPI** (`CryptProtectData`, current-user scope) | Sealed key file; only the same Windows account on the same machine can open it |
+| Key on the AWS server | Generated on the instance (`os.urandom`), kept in `/etc/hid-kiosk.env` (root-only, mode 600) | Never leaves the instance; not in the repo or the deploy state |
+| Central → edge people sync | Fernet with a key derived from the sync key (SHA-256), on top of HTTPS | End-to-end: CloudFront and the CloudFront → EC2 hop only see ciphertext; payloads older than 15 min are refused (replay) |
+| In transit | TLS (HTTPS) via CloudFront, HTTP redirected to HTTPS | CloudFront-managed certificate |
+| Recovery codes | SHA-256 hashes only | Codes are never stored |
+| Audit log integrity | SHA-256 hash chain | Any edited or removed record breaks the chain |
+| New server disks | EBS encryption (`Encrypted: True`) | AWS-managed key; applies when a new server is created |
+
+Data written before encryption was added is encrypted automatically at startup. If the key doesn't match the data, the app refuses to start.
 
 ## Cloud and infrastructure (AWS, us-east-1)
 
@@ -52,7 +68,7 @@
 
 | Tool | Purpose |
 |---|---|
-| `start.bat` | One-click local setup (venv, packages, models, ONNX export) and launch; edge-kiosk mode via `edge.bat` |
+| `start.bat` | One-click local setup (venv, packages, models, ONNX export) and launch; edge-kiosk mode via `edge.bat`. Starts with no internet once set up (packages reinstall only when `requirements.txt` changes) |
 | `deploy.bat` / `scripts/deploy_aws.py` (boto3) | Deploy, update, status, destroy, generate edge config |
 | `scripts/get_models.py`, `scripts/export_minifas_onnx.py` (PyTorch, export only) | Model download and conversion |
 | `scripts/sync_rekognition.py` | Push locally enrolled people to Rekognition |

@@ -8,6 +8,7 @@ numpy
 pyyaml
 boto3[crt]
 pyotp
+cryptography
 qrcode
 tzdata
 # only needed once, for scripts/export_minifas_onnx.py:

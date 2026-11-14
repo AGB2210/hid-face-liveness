@@ -27,6 +27,7 @@ import node  # noqa: E402
 import policy  # noqa: E402
 import sessions  # noqa: E402
 import store  # noqa: E402
+import vault  # noqa: E402
 from pipeline import engine  # noqa: E402
 from pipeline.config import CFG, DATA, ROOT, reload_config  # noqa: E402
 from pipeline.frames import analyse_frame, decode  # noqa: E402
@@ -596,6 +597,15 @@ def sync_policy() -> Response:
     return Response(policy.policy_text(), media_type="text/yaml")
 
 
+@app.get("/api/sync/people")
+def sync_people() -> dict:
+    """Edge kiosks copy everyone enrolled here, so they can still recognise them offline."""
+    if node.ROLE != "central":
+        raise HTTPException(404, "only the central server shares its people")
+    people = store.export_people()
+    return {"count": len(people), "sealed": vault.seal_for_sync(json.dumps(people).encode())}
+
+
 @app.post("/api/verify")
 async def verify(request: Request, frames: list[UploadFile] = File(...), claimed_id: str = Form(""),
                  challenge_id: str = Form(""), capture_ms: float = Form(0),
@@ -787,7 +797,7 @@ async def record(request: Request, label: str = Form(...), subject: str = Form(.
     clip = CLIPS / label / subject / time.strftime("%Y%m%d-%H%M%S")
     clip.mkdir(parents=True, exist_ok=True)
     for i, b in enumerate(jpegs):
-        (clip / f"frame_{i:02d}.jpg").write_bytes(b)
+        vault.write_file(clip / f"frame_{i:02d}.jpg", b)  # test faces are biometrics too
     (clip / "meta.json").write_text(json.dumps(
         {"label": label, "subject": subject, "capture_ms": capture_ms, "note": note,
          "frames": len(jpegs), "created": time.time()}, indent=2))
