@@ -30,7 +30,7 @@ import store  # noqa: E402
 from pipeline import engine  # noqa: E402
 from pipeline.config import CFG, DATA, ROOT, reload_config  # noqa: E402
 from pipeline.frames import analyse_frame, decode  # noqa: E402
-from pipeline.identity import get_provider, provider_name  # noqa: E402
+from pipeline.identity import get_provider, identity_thresholds, provider_name  # noqa: E402
 from pipeline.models import models_lock, warmup  # noqa: E402
 
 LABELS = ["live", "live_glasses", "live_sunglasses", "live_mask", "print", "screen_photo", "video_replay", "mask"]
@@ -77,7 +77,7 @@ def _allow(request: Request, permission: str, first_run: bool = False) -> dict |
     s = _sess(request)
     if admin.allowed(s, permission) or (first_run and admin.bootstrap_open()):
         return s
-    raise HTTPException(403, "Staff only - sign in with a qualified role")
+    raise HTTPException(403, "Staff only - sign in as an admin")
 
 
 def _kiosk_zone() -> str:
@@ -152,23 +152,69 @@ def users(request: Request) -> list[dict]:
 
 @app.delete("/api/users/{user_id}")
 def delete_user(request: Request, user_id: str) -> dict:
-    _allow(request, "manage_people")
+    s = _allow(request, "manage_people")
+    u = store.get_user(user_id)
+    if not u:
+        raise HTTPException(404, "unknown user")
+    if u.get("role") == admin.ADMIN:
+        _guard_admin_change(s, user_id)
     get_provider().delete(user_id)
+    store.append_audit(node.KIOSK_ID, None, user_id, "REMOVED", "admin", node.mode(), None, None, None,
+                       [f"Removed by {s['user_id'] if s else 'first-run setup'}"])
     return {"ok": True}
+
+
+def _admins() -> list[str]:
+    return [u["id"] for u in store.list_users() if u.get("role") == admin.ADMIN]
+
+
+def _guard_admin_change(s: dict | None, user_id: str, removing: bool = True) -> None:
+    """Granting or removing the admin role is sensitive: a recent face check (or recovery code),
+    and the last admin can't be removed - nobody could run the console afterwards."""
+    if admin.bootstrap_open() and not removing:
+        return  # first-run setup: appointing the first admin
+    if not admin.recent_face(s):
+        raise HTTPException(401, "reauth_face")
+    if removing and _admins() == [user_id]:
+        raise HTTPException(409, "This is the only admin - make someone else an admin first")
+
+
+def _ready_for_admin(user_id: str, email: str | None = None) -> None:
+    u = store.get_user(user_id) or {}
+    if not (email or u.get("email")):
+        raise HTTPException(400, "Add this person's email first - admins can sign in with it")
+
+
+def _grant_admin(s: dict | None, user_id: str) -> list[str]:
+    store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,
+                       [f"Admin granted by {s['user_id'] if s else 'first-run setup'}"])
+    return admin.new_recovery_codes(user_id)
 
 
 @app.post("/api/enroll")
 async def enroll(request: Request, user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
                  role: str = Form("student"), valid_until: str = Form(""), poses: str = Form(""),
                  email: str = Form(""), frames: list[UploadFile] = File(...)) -> dict:
-    _allow(request, "manage_people", first_run=True)
+    s = _allow(request, "manage_people", first_run=True)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", user_id):
         raise HTTPException(400, "user_id: letters, digits, _ . - only")
+    if role not in policy.roles(node.current_policy()):
+        raise HTTPException(400, "unknown role")
+    existing = store.get_user(user_id)
+    if existing:
+        raise HTTPException(409, f"User ID '{user_id}' is already enrolled ({existing['name']}). "
+                                 "Pick another ID, or remove that entry first to re-enroll.")
     _check_email(email, user_id)
+    if role == admin.ADMIN:
+        _ready_for_admin(user_id, email.strip())
+        _guard_admin_change(s, user_id, removing=False)
     jpegs = await _read(frames)
     res = await run_in_threadpool(_enroll, user_id, name, phone, role, valid_until, jpegs, poses)
     if email.strip():
         store.set_email(user_id, email)
+    if role == admin.ADMIN:
+        res["recovery_codes"] = _grant_admin(s, user_id)
+        res["setup_done"] = s is None  # first admin enrolled: first-run setup is now closed
     return res
 
 
@@ -224,6 +270,16 @@ def _enroll(user_id, name, phone, role, valid_until, jpegs, poses: str = "") -> 
                 break
             if all(f is not c for c in chosen):
                 chosen.append(f)
+        # duplicate check: the same face must not be enrolled under a second ID - 1:N matching
+        # would then be ambiguous and the person might be recognised under the wrong role
+        try:
+            dup = get_provider().identify(chosen) if store.user_ids() else {}
+        except Exception as e:  # AWS credentials / network
+            raise HTTPException(502, f"Identity provider error: {type(e).__name__}: {e}"[:300])
+        if dup.get("user_id") and dup["user_id"] != user_id and \
+                (dup.get("similarity") or 0) >= identity_thresholds()["match"]:
+            raise HTTPException(409, f"This face is already enrolled as {dup['name']} ({dup['user_id']}). "
+                                     "Change that person's role or details in the table instead of enrolling again.")
         try:
             n = get_provider().enroll(user_id, name, phone or None, chosen)
         except ValueError as e:
@@ -260,16 +316,34 @@ def _new_totp(user_id: str, name: str) -> dict:
 @app.post("/api/users/{user_id}/access")
 def set_access(request: Request, user_id: str, role: str = Form(...), valid_until: str = Form(""),
                email: str | None = Form(None)) -> dict:
-    _allow(request, "manage_people")
-    if email is not None:
-        _check_email(email, user_id)
-        store.set_email(user_id, email)
-    if not store.get_user(user_id):
+    s = _allow(request, "manage_people", first_run=True)
+    u = store.get_user(user_id)
+    if not u:
         raise HTTPException(404, "unknown user")
     if role not in policy.roles(node.current_policy()):
         raise HTTPException(400, "unknown role")
+    was_admin, now_admin = u.get("role") == admin.ADMIN, role == admin.ADMIN
+    if s is None and not now_admin:
+        raise HTTPException(403, "Staff only - sign in as an admin")  # first-run: only appointing the first admin
+    if email is not None:
+        _check_email(email, user_id)
+    if was_admin != now_admin:
+        if now_admin:
+            if not u.get("totp_secret"):
+                raise HTTPException(400, "This person needs an authenticator app first (New QR)")
+            _ready_for_admin(user_id, store.normalise_email(email) if email is not None else None)
+        _guard_admin_change(s, user_id, removing=was_admin)
+    if email is not None:
+        store.set_email(user_id, email)
     store.set_access(user_id, role, valid_until or None)
-    return {"ok": True}
+    out = {"ok": True}
+    if now_admin and not was_admin:
+        out["recovery_codes"] = _grant_admin(s, user_id)
+    elif was_admin and not now_admin:
+        store.set_recovery_codes(user_id, [])
+        store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,
+                           [f"Admin removed by {s['user_id']}"])
+    return out
 
 
 @app.post("/api/users/{user_id}/authenticator")
@@ -390,10 +464,10 @@ def _admin_face_check(user_id, challenge_id, burst_id, n_frames, jpegs) -> dict:
         reasons.append("Remove sunglasses / face mask")
     target = user_id or ident.get("user_id")
     if not target or ident.get("user_id") != target or (ident.get("similarity") or 0) < need:
-        reasons.append("Face does not match this user" if user_id else "Face not recognised as staff")
+        reasons.append("Face does not match this user" if user_id else "Face not recognised as an admin")
     ok = not reasons and admin.is_staff(target)
     if not ok and not reasons:
-        reasons.append("Face not recognised as staff")  # don't reveal who a non-staff face belongs to
+        reasons.append("Face not recognised as an admin")  # don't reveal who a non-admin face belongs to
     if not ok and target:
         admin._fail(target)
     store.append_audit(node.KIOSK_ID, None, target if ok or user_id else None, "ADMIN_FACE_OK" if ok else "ADMIN_FACE_FAIL", "admin",
@@ -403,7 +477,7 @@ def _admin_face_check(user_id, challenge_id, burst_id, n_frames, jpegs) -> dict:
     if ok:
         u = store.get_user(target)
         out.update(face_token=admin.issue_face_token(target), user_id=target, name=u["name"] if u else target,
-                   role_name=admin.ROLES.get(u.get("admin_role")) if u else None)
+                   role_name="Admin")
     return out
 
 
@@ -475,32 +549,6 @@ def admin_me_for(s: dict | None) -> dict:
 @app.get("/api/admin/me")
 def admin_me(request: Request) -> dict:
     return admin_me_for(_admin(request))
-
-
-@app.post("/api/users/{user_id}/admin_role")
-def set_admin_role(request: Request, user_id: str, role: str = Form("")) -> dict:
-    s = _admin(request)
-    if role and role not in admin.ROLES:
-        raise HTTPException(400, "unknown admin role")
-    if not store.get_user(user_id):
-        raise HTTPException(404, "unknown user")
-    first = admin.bootstrap_open() and role == "policy_admin"
-    if not (admin.allowed(s, "edit_policy") or first):
-        raise HTTPException(403, "Only a policy admin can grant or revoke admin roles")
-    if not first and not admin.recent_face(s):
-        raise HTTPException(401, "reauth_face")
-    if not store.get_user(user_id).get("totp_secret"):
-        raise HTTPException(400, "This person needs an authenticator app first (New QR on the Enroll page)")
-    if role and not store.get_user(user_id).get("email"):
-        raise HTTPException(400, "Add this person's email first - staff sign in with it")
-    store.set_admin_role(user_id, role or None)
-    by = s["user_id"] if s else "first-run setup"
-    store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,
-                       [f"{admin.ROLES.get(role, 'no admin role')} granted by {by}"])
-    codes = admin.new_recovery_codes(user_id) if role else []
-    if not role:
-        store.set_recovery_codes(user_id, [])
-    return {"ok": True, "recovery_codes": codes}
 
 
 @app.put("/api/policy")

@@ -20,7 +20,8 @@ POLICY_FILE = Path(__file__).resolve().parent / "access_policy.yaml"   # shipped
 EDITED_FILE = DATA / "access_policy.yaml"   # admin edits (kept in data/, so redeploys don't overwrite them)
 HISTORY_DIR = DATA / "policy_history"       # every previous version, timestamped
 CACHE_FILE = DATA / "policy_cache.yaml"     # copy pulled from the central server (edge kiosks)
-DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+ADMIN = "admin"                              # built-in role: every door, any time, plus the staff console
+DAYS = ["Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _WIN = re.compile(r"^\s*([A-Za-z,\-]+)\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$")
 
 
@@ -55,6 +56,8 @@ def validate(pol: dict) -> list[str]:
     for zid, z in zones.items():
         if (z or {}).get("security") not in ("standard", "high"):
             errs.append(f"Zone {zid}: security must be 'standard' or 'high'")
+    if ADMIN in roles:
+        errs.append("'admin' is a built-in role (every door, any time) and can't be scheduled")
     for rid, r in roles.items():
         for zid, wins in ((r or {}).get("zones") or {}).items():
             if zid not in zones:
@@ -185,7 +188,10 @@ def evaluate(user: dict | None, zone_id: str, at: str | None = None, pol: dict |
     if not user:
         return {**base, "verdict": "outside", "reason": "No identified person"}
     role_id = user.get("role") or "visitor"
-    role = pol["roles"].get(role_id)
+    if role_id == ADMIN:  # built-in: every zone, any time, holidays included (expiry still applies)
+        role = {"name": "Admin", "holidays_apply": False, "zones": {z: ["Mon-Sun 00:00-24:00"] for z in pol["zones"]}}
+    else:
+        role = pol["roles"].get(role_id)
     base["role"] = (role or {}).get("name", role_id)
     if role is None:
         return {**base, "verdict": "outside", "reason": f"Unknown role '{role_id}'"}
@@ -215,4 +221,6 @@ def zones(pol: dict | None = None) -> dict:
 
 def roles(pol: dict | None = None) -> dict:
     pol = pol or load()
-    return {k: v.get("name", k) for k, v in pol["roles"].items()}
+    out = {k: v.get("name", k) for k, v in pol["roles"].items() if k != ADMIN}
+    out[ADMIN] = "Admin"
+    return out

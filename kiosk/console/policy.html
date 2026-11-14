@@ -85,7 +85,7 @@
       $("holidays").value = pol.holidays.join(", ");
       const bar = $("editBar");
       if (me.edge) bar.innerHTML = '<span class="small muted">This kiosk follows the central server\'s schedule - edit it there.</span>';
-      else if (!me.can.edit_policy) bar.innerHTML = '<span class="small muted">Read-only. Editing needs the Policy admin role.</span>';
+      else if (!me.can.edit_policy) bar.innerHTML = '<span class="small muted">Read-only. Editing needs the Admin role.</span>';
       else bar.innerHTML = editing
         ? '<button id="save">Save changes</button><button class="secondary" id="cancel">Cancel</button>'
         : '<button class="secondary" id="edit">Edit schedule</button>';

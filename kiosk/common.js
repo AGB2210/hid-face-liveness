@@ -320,11 +320,23 @@ export function showRecoveryCodes(codes, who) {
 
 /** POST a form; if the server asks for a fresh face check, do it and retry once. */
 export async function postWithReauth(me, url, fd) {
+  return withReauth(me, () => postForm(url, fd));
+}
+
+/** Run a request; if the server asks for a fresh face check, do it and retry once. */
+export async function withReauth(me, fn) {
   try {
-    return await postForm(url, fd);
+    return await fn();
   } catch (e) {
     if (e.message !== "reauth_face") throw e;
     if (!(await faceReauth(me))) throw new Error("a fresh face check is required for this change");
-    return postForm(url, fd);
+    return fn();
   }
+}
+
+export async function deleteJSON(url) {
+  const r = await fetch(url, { method: "DELETE" });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+  return body;
 }

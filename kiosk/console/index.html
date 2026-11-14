@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HID Staff Console</title>
+  <title>HID Admin Console</title>
   <link rel="stylesheet" href="../styles.css" />
 </head>
 <body class="signin">
   <main class="signin-wrap">
     <div class="signin-card">
-      <div class="row" style="gap:12px"><span class="logo">HID</span><span class="brand">Staff console</span></div>
+      <div class="row" style="gap:12px"><span class="logo">HID</span><span class="brand">Admin console</span></div>
       <h1>Sign in</h1>
       <ol class="steps" id="steps" style="margin:0 0 22px">
         <li data-k="who" class="active">Identify</li><li data-k="code">Code</li>
@@ -47,20 +47,18 @@
 
       <div class="setup hidden" id="setup">
         <b>First-run setup</b>
-        <p class="small" style="margin:6px 0 12px">No policy admin exists yet. Enroll yourself, scan the QR code with an authenticator app,
-          and set your admin role to Policy admin. This closes as soon as one exists.</p>
+        <p class="small" style="margin:6px 0 12px">No admin exists yet. Enroll yourself with the role Admin and your email, then scan
+          the QR code with an authenticator app. This closes as soon as one admin exists; after that only admins can add people.</p>
         <a class="btn secondary-link" href="/console/enroll.html">Start setup</a>
       </div>
       <details class="small muted" style="margin-top:26px">
-        <summary>How staff sign-in works</summary>
-        <p>Identify yourself with a live face check (liveness plus a random blink or head-turn cue, recognised only among staff)
-          or with your email, then enter the code from your authenticator app. Policy edits and role changes always ask for a
-          fresh face check (or a one-time recovery code if the webcam fails).</p>
-        <table style="margin-top:10px">
-          <tr><td>Policy admin</td><td>Everything, including editing the access schedule and granting roles</td></tr>
-          <tr><td>Operator</td><td>Enroll people, record test clips, run the evaluation, kiosk demo controls</td></tr>
-          <tr><td>Auditor</td><td>Read-only: audit log, access schedule, results</td></tr>
-        </table>
+        <summary>How admin sign-in works</summary>
+        <p>The console is for people with the Admin role. Admins can open every door at any time and do everything here:
+          enroll people, edit the access schedule, read the audit log, record clips and run the evaluation. Students, staff,
+          contractors and visitors only use the kiosk.</p>
+        <p>Identify yourself with a live face check (liveness plus a random blink or head-turn cue, recognised only among admins)
+          or with your email, then enter the code from your authenticator app. Schedule edits and adding or removing an admin
+          always ask for a fresh face check (or a one-time recovery code if the webcam fails).</p>
       </details>
     </div>
     <p class="small muted signin-foot">Every sign-in attempt and face check is recorded in the audit log.</p>
@@ -110,7 +108,7 @@
         if (r.ok) {
           userId = r.user_id;
           faceToken = r.face_token;
-          toCode(`Recognised as <b>${esc(r.name)}</b> · ${esc(r.role_name || "staff")}. Now enter the code from your authenticator app.`);
+          toCode(`Recognised as <b>${esc(r.name)}</b> · ${esc(r.role_name || "Admin")}. Now enter the code from your authenticator app.`);
         } else {
           $("faceMsg").textContent = r.reasons.join(". ");
           $("faceMsg").style.color = "var(--deny)";

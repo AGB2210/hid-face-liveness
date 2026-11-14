@@ -41,7 +41,7 @@
         <form id="form" class="stack">
           <label>User ID <input id="uid" required pattern="[A-Za-z0-9_.\-]{1,40}" placeholder="e.g. alice" /></label>
           <label>Full name <input id="name" required placeholder="Alice Smith" /></label>
-          <label>Email (staff sign in with it) <input id="email" type="email" placeholder="alice@example.com" /></label>
+          <label>Email (needed for admins: they can sign in with it) <input id="email" type="email" placeholder="alice@example.com" /></label>
           <div class="row" style="gap:24px;align-items:flex-end">
             <label style="flex:1">Role <select id="role"></select></label>
             <label style="flex:1">Access valid until <input id="valid" type="date" /></label>
@@ -61,18 +61,16 @@
     </div>
   </section>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, postWithReauth, showRecoveryCodes, staffNav, startCamera } from "../common.js";
+    import { captureBurst, deleteJSON, esc, framesForm, getConfig, guard, halt, postForm, postWithReauth, showRecoveryCodes, staffNav, startCamera, withReauth } from "../common.js";
     import { createTracker, hint, track } from "../facetrack.js";
     const $ = (id) => document.getElementById(id);
     const me = await staffNav("enroll");
     if (!guard(me, "manage_people", { firstRun: true })) await halt();
-    if (me.bootstrap) $("msg").textContent = "First-run setup: enroll yourself with your email, scan the QR code, then set your Admin role to Policy admin in the table below.";
+    if (me.bootstrap) $("msg").textContent = "First-run setup: enroll yourself with the role Admin and your email, then scan the QR code.";
     const cfg = await getConfig();
     const roles = cfg.roles || {};
     const roleOpts = (sel) => Object.entries(roles).map(([k, v]) => `<option value="${esc(k)}"${k === sel ? " selected" : ""}>${esc(v)}</option>`).join("");
-    $("role").innerHTML = roleOpts("student");
-    const ADMIN_ROLES = { "": "None", policy_admin: "Policy admin", operator: "Operator", auditor: "Auditor" };
-    const adminOpts = (sel) => Object.entries(ADMIN_ROLES).map(([k, v]) => `<option value="${k}"${(sel || "") === k ? " selected" : ""}>${v}</option>`).join("");
+    $("role").innerHTML = roleOpts(me.bootstrap ? "admin" : "student");
 
     function showQr(auth, who) {
       $("qr").innerHTML = auth.svg.replace(/<\?xml[^>]*>/, "");
@@ -81,43 +79,43 @@
     }
 
     async function loadUsers() {
-      const users = await (await fetch("/api/users")).json();
-      $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Valid until</th><th>Face templates</th><th>Authenticator</th><th>Admin role</th><th></th></tr>" + (users.length
+      const r = await fetch("/api/users");
+      if (!r.ok) { $("users").innerHTML = '<tr><td class="muted">Sign in as an admin to see enrolled people.</td></tr>'; return; }
+      const users = await r.json();
+      $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Valid until</th><th>Face templates</th><th>Authenticator</th><th></th></tr>" + (users.length
         ? users.map((u) => `<tr data-id="${esc(u.id)}"><td class="mono">${esc(u.id)}</td><td>${esc(u.name)}</td>
             <td><input type="email" data-f="email" value="${esc(u.email || "")}" placeholder="add email" style="min-width:170px" /></td>
             <td><select data-f="role">${roleOpts(u.role || "visitor")}</select></td>
             <td><input type="date" data-f="valid" value="${esc(u.valid_until || "")}" /></td>
             <td class="mono">${u.n} local${u.n_rekognition ? ` · ${u.n_rekognition} Rekognition` : ""}</td>
             <td>${u.has_totp ? "Enrolled" : '<span class="muted">None</span>'} <button class="secondary small-btn" data-qr>New QR</button></td>
-            <td><select data-admin ${me.can?.grant_roles || me.bootstrap ? "" : "disabled"}>${adminOpts(u.admin_role)}</select></td>
             <td><button class="secondary small-btn" data-del>Remove</button></td></tr>`).join("")
-        : '<tr><td colspan="9" class="muted">Nobody enrolled yet</td></tr>');
+        : '<tr><td colspan="8" class="muted">Nobody enrolled yet</td></tr>');
     }
     $("users").addEventListener("change", async (e) => {
       const tr = e.target.closest("tr");
       if (!tr) return;
-      if (e.target.hasAttribute("data-admin")) {
-        try {
-          const r = await postWithReauth(me, `/api/users/${encodeURIComponent(tr.dataset.id)}/admin_role`, framesForm([], { role: e.target.value }));
-          $("msg").textContent = `Admin role updated for ${tr.dataset.id}. Sign in at /console to use it.`;
-          if (r.recovery_codes?.length) showRecoveryCodes(r.recovery_codes, tr.dataset.id);
-        } catch (err) { $("msg").textContent = `Not changed: ${err.message}`; }
-        loadUsers();
-        return;
-      }
       try {
-        await postForm(`/api/users/${encodeURIComponent(tr.dataset.id)}/access`, framesForm([], {
+        // granting or removing Admin asks for a fresh face check
+        const r = await postWithReauth(me, `/api/users/${encodeURIComponent(tr.dataset.id)}/access`, framesForm([], {
           role: tr.querySelector('[data-f="role"]').value, valid_until: tr.querySelector('[data-f="valid"]').value,
           email: tr.querySelector('[data-f="email"]').value }));
         $("msg").textContent = `Updated ${tr.dataset.id}.`;
+        if (r.recovery_codes?.length) {
+          $("msg").textContent = `${tr.dataset.id} is now an admin and can sign in at /console.`;
+          showRecoveryCodes(r.recovery_codes, tr.dataset.id);
+        }
       } catch (err) { $("msg").textContent = `Not updated: ${err.message}`; loadUsers(); }
     });
     $("users").addEventListener("click", async (e) => {
       const tr = e.target.closest("tr");
       if (!tr) return;
       const id = tr.dataset.id;
-      if (e.target.hasAttribute("data-del") && confirm(`Remove ${id}?`)) {
-        await fetch(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (e.target.hasAttribute("data-del") && confirm(`Remove ${id}? Their face templates are deleted.`)) {
+        try {
+          await withReauth(me, () => deleteJSON(`/api/users/${encodeURIComponent(id)}`));
+          $("msg").textContent = `Removed ${id}.`;
+        } catch (err) { $("msg").textContent = `Not removed: ${err.message}`; }
         loadUsers();
       }
       if (e.target.hasAttribute("data-qr")) {
@@ -210,7 +208,7 @@
         const { blobs, labels } = tracker ? await guidedCapture() : await timedCapture();
         $("banner").textContent = "Checking liveness and enrolling";
         $("msg").textContent = "Processing";
-        const r = await postForm("/api/enroll", framesForm(blobs, {
+        const r = await postWithReauth(me, "/api/enroll", framesForm(blobs, {
           user_id: $("uid").value.trim(), name: $("name").value.trim(), phone: $("phone").value.trim(),
           role: $("role").value, valid_until: $("valid").value, poses: labels.join(","), email: $("email").value.trim() }));
         $("msg").textContent = `Enrolled ${r.user_id}: ${r.templates} face templates (${Object.keys(r.poses).filter((k) => r.poses[k]).join(", ")}), ` +
@@ -218,6 +216,11 @@
         $("banner").textContent = "Enrolled";
         $("cam").className = "cam allow";
         showQr(r.authenticator, r.user_id);
+        if (r.recovery_codes?.length) showRecoveryCodes(r.recovery_codes, r.user_id);
+        if (r.setup_done) {
+          $("msg").innerHTML = `Enrolled ${esc(r.user_id)} as the first admin. Scan the QR code and save the recovery codes, then ` +
+            `<a href="/console/">sign in</a>. First-run setup is now closed.`;
+        }
         loadUsers();
       } catch (err) {
         say("");

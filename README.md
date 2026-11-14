@@ -32,18 +32,23 @@ There are two separate apps:
 | App | URL | Who sees it |
 |---|---|---|
 | **Kiosk** | `/` | Everyone. Face recognition and the access decision only, with no links to the back office. |
-| **Staff console** | `/console/` | Staff only. Its own sign-in screen (user ID + authenticator code), then role-filtered pages. |
+| **Admin console** | `/console/` | Admins only. Its own sign-in screen (face check or email, then authenticator code). |
 
-| Console page | Purpose | Roles |
-|---|---|---|
-| `/console/enroll.html` | Guided enrollment, people's roles and access expiry, authenticator QR codes, admin roles | Policy admin, operator |
-| `/console/policy.html` | Access schedule matrix, editing (policy admin), "test a decision" tool | All staff |
-| `/console/audit.html` | Hash-chained decision log, sync status, chain integrity | Policy admin, auditor |
-| `/console/record.html` | Record labelled test clips for the evaluation | Policy admin, operator |
-| `/console/report.html` | Results: **Run evaluation** replays every clip and computes the metrics | All staff |
+Roles: **student, staff, contractor, visitor** use the kiosk only, with door access set by the schedule.
+**admin** is one extra built-in role: every door at any time, plus every console page and power.
 
-**First run:** until a policy admin exists, `/console/enroll.html` is open. Enroll yourself, scan the QR code, and set your admin role to Policy admin.
-Signed-in staff also get the demo controls on the kiosk: zone, demo clock, network-loss simulation and signals.
+| Console page | Purpose |
+|---|---|
+| `/console/enroll.html` | Guided enrollment, roles (including Admin), access expiry, emails, authenticator QR codes |
+| `/console/policy.html` | Access schedule matrix, editing, "test a decision" tool |
+| `/console/audit.html` | Hash-chained decision log, sync status, chain integrity |
+| `/console/record.html` | Record labelled test clips for the evaluation |
+| `/console/report.html` | Results: **Run evaluation** replays every clip and computes the metrics |
+
+**First run:** until an admin exists, `/console/enroll.html` is open. Enroll yourself with the role Admin and your email, then scan the QR code.
+After that only admins can enroll people or make someone an admin. Adding or removing an admin needs a fresh face check, and the last admin can't be removed.
+**No duplicates:** enrollment is refused if the user ID already exists or the face already belongs to someone enrolled (emails are unique too).
+Signed-in admins also get the demo controls on the kiosk: zone, demo clock, network-loss simulation and signals.
 
 ## Secure access beyond liveness
 

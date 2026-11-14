@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS audit (
 for _col in ("role", "valid_until", "totp_secret", "admin_role", "email"):
     if _col not in [r["name"] for r in _db.execute("PRAGMA table_info(users)")]:
         _db.execute(f"ALTER TABLE users ADD COLUMN {_col} TEXT")
+# one admin role now: former policy admins become admins; the old operator/auditor roles are gone
+_db.execute("UPDATE users SET role='admin' WHERE admin_role='policy_admin'")
+_db.execute("UPDATE users SET admin_role=NULL WHERE admin_role IS NOT NULL")
 _db.commit()
 
 AUDIT_FIELDS = ("id", "seq", "ts", "kiosk", "zone", "user_id", "decision", "stage", "mode",
@@ -98,7 +101,7 @@ def delete_user(user_id: str) -> None:
 
 
 def list_users() -> list[dict]:
-    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.email, u.created, u.role, u.valid_until, u.admin_role,
+    rows = _db.execute("""SELECT u.id, u.name, u.phone, u.email, u.created, u.role, u.valid_until,
                             (u.totp_secret IS NOT NULL) has_totp,
                             (SELECT COUNT(*) FROM templates t WHERE t.user_id=u.id) n,
                             (SELECT COUNT(*) FROM rek_faces r WHERE r.user_id=u.id) n_rekognition
@@ -159,12 +162,6 @@ def get_user_by_email(email: str) -> dict | None:
 def set_email(user_id: str, email: str | None) -> None:
     with _lock:
         _db.execute("UPDATE users SET email=? WHERE id=?", (normalise_email(email), user_id))
-        _db.commit()
-
-
-def set_admin_role(user_id: str, role: str | None) -> None:
-    with _lock:
-        _db.execute("UPDATE users SET admin_role=? WHERE id=?", (role or None, user_id))
         _db.commit()
 
 

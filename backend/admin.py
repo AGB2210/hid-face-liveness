@@ -1,16 +1,15 @@
-"""Qualified roles for sensitive functions (separation of duties).
+"""Console access. One extra access role, "admin", on top of the door roles (student, staff,
+contractor, visitor): an admin can open every door at any time and has every console power.
+Everyone else only ever sees the kiosk decision.
 
-  policy_admin  everything, incl. editing the campus access schedule and granting roles
-  operator      enrollment desk: enroll people, record test clips, run the evaluation, demo controls
-  auditor       read-only: audit log, policy, results
+The first admin is enrolled during first-run setup (open until an admin exists); after that only
+an admin can enroll people or make someone an admin.
 
-Everyone else (students, visitors) only ever sees the kiosk decision.
-
-Sign-in = identify yourself EITHER with a live face check (recognised among staff, with liveness
+Sign-in = identify yourself EITHER with a live face check (recognised among admins, with liveness
 and a random cue) OR by typing your email - then, either way, a code from your authenticator app.
-Policy edits and role grants need a face check from the last 5 minutes (a one-time recovery code
-can stand in for it if a webcam fails), so an email sign-in can't change anything sensitive.
-Every sign-in, failure, grant and policy change is audited.
+Policy edits and admin grants/removals need a face check from the last 5 minutes (a one-time
+recovery code can stand in for it if a webcam fails), so an email sign-in can't change anything
+sensitive. Every sign-in, failure, grant and policy change is audited.
 """
 from __future__ import annotations
 
@@ -22,18 +21,14 @@ import pyotp
 
 import store
 
-ROLES = {"policy_admin": "Policy admin", "operator": "Operator", "auditor": "Auditor"}
-ALL = set(ROLES)
-CAN = {
-    "edit_policy": {"policy_admin"},
-    "grant_roles": {"policy_admin"},
-    "view_policy": ALL,
-    "view_audit": {"policy_admin", "auditor"},
-    "manage_people": {"policy_admin", "operator"},   # enroll, edit access, record clips
-    "run_eval": {"policy_admin", "operator"},
-    "view_results": ALL,
-    "kiosk_controls": {"policy_admin", "operator"},  # demo clock, zone override, simulate network loss
-}
+ADMIN = "admin"
+ROLES = {ADMIN: "Admin"}
+CAN = {perm: {ADMIN} for perm in (
+    "edit_policy", "grant_roles", "view_policy", "view_audit",
+    "manage_people",      # enroll, edit access, record clips
+    "run_eval", "view_results",
+    "kiosk_controls",     # demo clock, zone override, simulate network loss
+)}
 SESSION_S = 15 * 60
 MAX_FAILS, LOCK_S = 5, 300
 FACE_TOKEN_S = 120          # a passed face check must be used for sign-in within 2 minutes
@@ -59,7 +54,7 @@ def _fail(user_id: str) -> None:
 
 def is_staff(user_id: str) -> bool:
     u = store.get_user(user_id)
-    return bool(u and u.get("admin_role") in ROLES)
+    return bool(u and u.get("role") == ADMIN)
 
 
 # ------------------------------------------------------------------ factor 1: face + liveness
@@ -99,9 +94,9 @@ def login(user_id: str, code: str, face_token: str | None = None) -> tuple[str |
     if _locked_out(user_id, now):
         return None, "Too many failed attempts - try again in a few minutes"
     u = store.get_user(user_id)
-    if not (u and u.get("admin_role") in ROLES and _totp_ok(u, code)):
+    if not (u and u.get("role") == ADMIN and _totp_ok(u, code)):
         _fail(user_id)
-        return None, "Not authorised: needs a staff role and a valid authenticator code"
+        return None, "Not authorised: needs the admin role and a valid authenticator code"
     via = "email"
     if face_token:
         if not take_face_token(face_token, user_id):
@@ -111,7 +106,7 @@ def login(user_id: str, code: str, face_token: str | None = None) -> tuple[str |
     token = secrets.token_urlsafe(32)
     with _lock:
         _fails.pop(user_id, None)
-        _sessions[token] = {"user_id": user_id, "role": u["admin_role"], "expires": now + SESSION_S,
+        _sessions[token] = {"user_id": user_id, "role": ADMIN, "expires": now + SESSION_S,
                             "face_at": now if via == "face" else 0.0, "via": via}
     return token, f"Signed in ({via} + authenticator)"
 
@@ -146,7 +141,7 @@ def session(token: str | None) -> dict | None:
             s = None
     if s:  # role may have been revoked since sign-in
         u = store.get_user(s["user_id"])
-        if not u or u.get("admin_role") != s["role"]:
+        if not u or u.get("role") != ADMIN:
             logout(token)
             return None
     return s
@@ -162,6 +157,6 @@ def allowed(sess: dict | None, permission: str) -> bool:
 
 
 def bootstrap_open() -> bool:
-    """First-run setup: until someone holds the policy-admin role, anyone signed in to the
-    site may appoint the first policy admin. After that only a policy admin can grant roles."""
-    return not any(u.get("admin_role") == "policy_admin" for u in store.list_users())
+    """First-run setup: until an admin exists, anyone signed in to the site may enroll the
+    first admin. After that only an admin can enroll people or grant the admin role."""
+    return not any(u.get("role") == ADMIN for u in store.list_users())
