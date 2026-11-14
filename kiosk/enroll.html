@@ -9,7 +9,7 @@
 <body>
   <header>
     <span class="logo">HID</span><h1>Enrollment</h1>
-    <nav><a href="/">Kiosk</a><a href="/enroll.html" class="active">Enroll</a><a href="/policy.html">Policy</a><a href="/audit.html">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+    <nav id="nav"></nav>
   </header>
   <main class="grid">
     <section class="stack">
@@ -60,13 +60,18 @@
     </div>
   </section>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, postForm, startCamera } from "./common.js";
+    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, staffNav, startCamera } from "./common.js";
     import { createTracker, hint, track } from "./facetrack.js";
     const $ = (id) => document.getElementById(id);
+    const me = await staffNav("enroll");
+    if (!guard(me, "manage_people", { firstRun: true })) await halt();
+    if (me.bootstrap) $("msg").textContent = "First-run setup: enroll yourself, scan the QR code, then set your Admin role to Policy admin in the table below.";
     const cfg = await getConfig();
     const roles = cfg.roles || {};
     const roleOpts = (sel) => Object.entries(roles).map(([k, v]) => `<option value="${esc(k)}"${k === sel ? " selected" : ""}>${esc(v)}</option>`).join("");
     $("role").innerHTML = roleOpts("student");
+    const ADMIN_ROLES = { "": "None", policy_admin: "Policy admin", operator: "Operator", auditor: "Auditor" };
+    const adminOpts = (sel) => Object.entries(ADMIN_ROLES).map(([k, v]) => `<option value="${k}"${(sel || "") === k ? " selected" : ""}>${v}</option>`).join("");
 
     function showQr(auth, who) {
       $("qr").innerHTML = auth.svg.replace(/<\?xml[^>]*>/, "");
@@ -76,18 +81,27 @@
 
     async function loadUsers() {
       const users = await (await fetch("/api/users")).json();
-      $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Role</th><th>Valid until</th><th>Face templates</th><th>Authenticator</th><th></th></tr>" + (users.length
+      $("users").innerHTML = "<tr><th>ID</th><th>Name</th><th>Role</th><th>Valid until</th><th>Face templates</th><th>Authenticator</th><th>Admin role</th><th></th></tr>" + (users.length
         ? users.map((u) => `<tr data-id="${esc(u.id)}"><td class="mono">${esc(u.id)}</td><td>${esc(u.name)}</td>
             <td><select data-f="role">${roleOpts(u.role || "visitor")}</select></td>
             <td><input type="date" data-f="valid" value="${esc(u.valid_until || "")}" /></td>
             <td class="mono">${u.n} local${u.n_rekognition ? ` · ${u.n_rekognition} Rekognition` : ""}</td>
             <td>${u.has_totp ? "Enrolled" : '<span class="muted">None</span>'} <button class="secondary small-btn" data-qr>New QR</button></td>
+            <td><select data-admin ${me.can?.grant_roles || me.bootstrap ? "" : "disabled"}>${adminOpts(u.admin_role)}</select></td>
             <td><button class="secondary small-btn" data-del>Remove</button></td></tr>`).join("")
-        : '<tr><td colspan="7" class="muted">Nobody enrolled yet</td></tr>');
+        : '<tr><td colspan="8" class="muted">Nobody enrolled yet</td></tr>');
     }
     $("users").addEventListener("change", async (e) => {
       const tr = e.target.closest("tr");
       if (!tr) return;
+      if (e.target.hasAttribute("data-admin")) {
+        try {
+          await postForm(`/api/users/${encodeURIComponent(tr.dataset.id)}/admin_role`, framesForm([], { role: e.target.value }));
+          $("msg").textContent = `Admin role updated for ${tr.dataset.id}. Sign in on the Staff page to use it.`;
+        } catch (err) { $("msg").textContent = `Not changed: ${err.message}`; }
+        loadUsers();
+        return;
+      }
       await postForm(`/api/users/${encodeURIComponent(tr.dataset.id)}/access`, framesForm([], {
         role: tr.querySelector('[data-f="role"]').value, valid_until: tr.querySelector('[data-f="valid"]').value }));
       $("msg").textContent = `Updated access for ${tr.dataset.id}.`;

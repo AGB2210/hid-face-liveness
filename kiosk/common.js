@@ -136,3 +136,49 @@ export function renderDebug(res) {
   rows.push(`<tr><td>Server timing</td><td>${t.processing} ms</td><td class="muted small">decode ${t.decode} · detect/landmarks ${t.detect_landmarks_quality} · liveness ${t.liveness} · identity ${t.identity}</td></tr>`);
   return `<table><tr><th>Check</th><th style="width:38%">Score</th><th>Details</th></tr>${rows.join("")}</table>`;
 }
+
+/* ---------------------------------------------------------------- staff roles + navigation */
+const NAV = [
+  ["kiosk", "/", "Kiosk", null],
+  ["enroll", "/enroll.html", "Enroll", "manage_people"],
+  ["policy", "/policy.html", "Policy", "view_policy"],
+  ["audit", "/audit.html", "Audit", "view_audit"],
+  ["record", "/record.html", "Record", "manage_people"],
+  ["report", "/report.html", "Results", "view_results"],
+];
+
+export async function getMe() {
+  try { return await (await fetch("/api/admin/me")).json(); } catch { return { can: {} }; }
+}
+
+/** Fill <nav id="nav"> with the links this person may use, plus staff sign-in / sign-out. */
+export async function staffNav(active) {
+  const me = await getMe();
+  const can = me.can || {};
+  const links = NAV.filter(([k, , , perm]) => !perm || can[perm] || (k === "enroll" && me.bootstrap))
+    .map(([k, href, label]) => `<a href="${href}"${k === active ? ' class="active"' : ""}>${label}</a>`).join("");
+  const who = me.user_id
+    ? `<a href="/staff.html" class="staff">${esc(me.name || me.user_id)} · ${esc(me.role_name)}</a>`
+    : `<a href="/staff.html" class="staff${active === "staff" ? " active" : ""}">Staff sign-in</a>`;
+  const nav = document.getElementById("nav");
+  if (nav) nav.innerHTML = links + who;
+  return me;
+}
+
+/** Replace the page with a "staff only" notice unless the signed-in role has the permission. */
+export function guard(me, permission, { firstRun = false } = {}) {
+  if (me.can?.[permission] || (firstRun && me.bootstrap)) return true;
+  const main = document.querySelector("main") || document.body;
+  document.querySelectorAll("main ~ section, section.wide").forEach((el) => el.remove());
+  main.className = "";
+  main.innerHTML = `<section class="card" style="max-width:520px;margin:10vh auto 0">
+    <h2>Staff only</h2>
+    <p style="margin:0 0 18px">This page is for authorised staff. ${me.user_id
+      ? `Your role (${esc(me.role_name)}) doesn't include it.`
+      : "Sign in with your user ID and authenticator code."}</p>
+    <a class="btn" href="/staff.html?next=${encodeURIComponent(location.pathname)}" style="text-decoration:none;display:inline-block">Staff sign-in</a>
+  </section>`;
+  return false;
+}
+
+export const halt = () => new Promise(() => {}); // stop a page script after guard() locks the page

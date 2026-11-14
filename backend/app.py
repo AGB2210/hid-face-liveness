@@ -21,6 +21,7 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+import admin  # noqa: E402
 import bursts  # noqa: E402
 import node  # noqa: E402
 import policy  # noqa: E402
@@ -66,6 +67,39 @@ async def access_gate(request: Request, call_next):
     return response
 
 
+def _sess(request: Request) -> dict | None:
+    return admin.session(request.cookies.get("hid_admin"))
+
+
+def _allow(request: Request, permission: str, first_run: bool = False) -> dict | None:
+    """Staff permission check. first_run=True also allows it during first-run setup
+    (before any policy admin exists) so the first admin can be enrolled."""
+    s = _sess(request)
+    if admin.allowed(s, permission) or (first_run and admin.bootstrap_open()):
+        return s
+    raise HTTPException(403, "Staff only - sign in with a qualified role")
+
+
+def _kiosk_zone() -> str:
+    return os.environ.get("HID_KIOSK_ZONE") or CFG["access"]["default_zone"]
+
+
+def _public(res: dict) -> dict:
+    """What a student/visitor at the kiosk gets back: the decision and what to do next -
+    no match scores for other people, no internal liveness numbers."""
+    ident, ctx, ch, occ = res.get("identity") or {}, res.get("context") or {}, res.get("challenge"), res.get("occlusion") or {}
+    out = {k: res.get(k) for k in ("decision", "reasons", "next", "challenge_request", "otp_request", "mode",
+                                   "capture_ms", "stage", "confidence") if k in res}
+    out["identity"] = {"name": ident.get("name"), "user_id": ident.get("user_id")} if ident.get("name") else {}
+    if ctx:
+        out["context"] = {k: ctx.get(k) for k in ("zone_name", "verdict", "time", "role", "security")}
+    if ch:
+        out["challenge"] = {"action": ch.get("action"), "passed": ch.get("passed")}
+    out["occlusion"] = {"sunglasses": occ.get("sunglasses"), "mask": occ.get("mask")}
+    out["timing_ms"] = {"processing": (res.get("timing_ms") or {}).get("processing")}
+    return out
+
+
 @app.post("/login")
 def login(password: str = Form(...)):
     if not PASSWORD or not secrets.compare_digest(password, PASSWORD):
@@ -100,30 +134,34 @@ def config() -> dict:
     pol = node.current_policy()
     return {"capture": CFG["capture"], "labels": LABELS, "actions": sessions.ACTIONS,
             "identity_provider": provider_name(), "zones": policy.zones(pol), "roles": policy.roles(pol),
-            "default_zone": CFG["access"]["default_zone"], "node": node.status()}
+            "default_zone": _kiosk_zone(), "node": {"mode": node.mode()}}
 
 
 @app.post("/api/config/reload")
-def config_reload() -> dict:
+def config_reload(request: Request) -> dict:
+    _allow(request, "edit_policy")
     reload_config()
     return {"ok": True}
 
 
 @app.get("/api/users")
-def users() -> list[dict]:
+def users(request: Request) -> list[dict]:
+    _allow(request, "view_policy", first_run=True)
     return store.list_users()
 
 
 @app.delete("/api/users/{user_id}")
-def delete_user(user_id: str) -> dict:
+def delete_user(request: Request, user_id: str) -> dict:
+    _allow(request, "manage_people")
     get_provider().delete(user_id)
     return {"ok": True}
 
 
 @app.post("/api/enroll")
-async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
+async def enroll(request: Request, user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
                  role: str = Form("student"), valid_until: str = Form(""), poses: str = Form(""),
                  frames: list[UploadFile] = File(...)) -> dict:
+    _allow(request, "manage_people", first_run=True)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", user_id):
         raise HTTPException(400, "user_id: letters, digits, _ . - only")
     jpegs = await _read(frames)
@@ -205,7 +243,8 @@ def _new_totp(user_id: str, name: str) -> dict:
 
 
 @app.post("/api/users/{user_id}/access")
-def set_access(user_id: str, role: str = Form(...), valid_until: str = Form("")) -> dict:
+def set_access(request: Request, user_id: str, role: str = Form(...), valid_until: str = Form("")) -> dict:
+    _allow(request, "manage_people")
     if not store.get_user(user_id):
         raise HTTPException(404, "unknown user")
     if role not in policy.roles(node.current_policy()):
@@ -215,7 +254,8 @@ def set_access(user_id: str, role: str = Form(...), valid_until: str = Form(""))
 
 
 @app.post("/api/users/{user_id}/authenticator")
-def reset_authenticator(user_id: str) -> dict:
+def reset_authenticator(request: Request, user_id: str) -> dict:
+    _allow(request, "manage_people", first_run=True)
     u = store.get_user(user_id)
     if not u:
         raise HTTPException(404, "unknown user")
@@ -224,7 +264,8 @@ def reset_authenticator(user_id: str) -> dict:
 
 # ---------------------------------------------------------------- policy, node, audit
 @app.get("/api/policy")
-def get_policy() -> dict:
+def get_policy(request: Request) -> dict:
+    _allow(request, "view_policy")
     pol = node.current_policy()
     return {"zones": pol["zones"], "roles": pol["roles"], "timezone": pol.get("timezone"),
             "grace_minutes": pol.get("grace_minutes"), "holidays": [str(h) for h in pol.get("holidays", [])],
@@ -232,8 +273,9 @@ def get_policy() -> dict:
 
 
 @app.post("/api/policy/test")
-def policy_test(zone: str = Form(...), user_id: str = Form(""), role: str = Form(""),
+def policy_test(request: Request, zone: str = Form(...), user_id: str = Form(""), role: str = Form(""),
                 valid_until: str = Form(""), at: str = Form("")) -> dict:
+    _allow(request, "view_policy")
     user = store.get_user(user_id) if user_id else {"role": role or "visitor", "valid_until": valid_until or None}
     return policy.evaluate(user, zone, at or None, node.current_policy())
 
@@ -254,19 +296,115 @@ def cue(zone: str = Form(""), avoid: str = Form("")) -> dict:
 
 
 @app.get("/api/node/status")
-def node_status() -> dict:
-    return node.status()
+def node_status(request: Request) -> dict:
+    st = node.status()
+    if admin.allowed(_sess(request), "view_policy"):
+        return st
+    return {"mode": st["mode"], "role": st["role"]}
 
 
 @app.post("/api/node/simulate_offline")
-def simulate_offline(on: bool = Form(...)) -> dict:
+def simulate_offline(request: Request, on: bool = Form(...)) -> dict:
+    _allow(request, "kiosk_controls")
     node.simulate_offline(on)
     return node.status()
 
 
+def _admin(request: Request) -> dict | None:
+    return _sess(request)
+
+
+def _require(request: Request, permission: str) -> dict:
+    return _allow(request, permission)
+
+
 @app.get("/api/audit")
-def audit(limit: int = 200) -> dict:
+def audit(request: Request, limit: int = 200) -> dict:
+    _require(request, "view_audit")
     return {"records": store.list_audit(limit), "chains": store.verify_chains(), "node": node.status()}
+
+
+# ---------------------------------------------------------------- qualified roles
+@app.post("/api/admin/login")
+def admin_login(user_id: str = Form(...), code: str = Form(...)):
+    from fastapi.responses import JSONResponse
+    token, msg = admin.login(user_id.strip(), code)
+    store.append_audit(node.KIOSK_ID, None, user_id.strip() or None, "ADMIN_SIGNIN" if token else "ADMIN_DENIED",
+                       "admin", node.mode(), None, None, None, [msg])
+    if not token:
+        raise HTTPException(403, msg)
+    r = JSONResponse({"ok": True, **admin_me_for(admin.session(token))})
+    r.set_cookie("hid_admin", token, max_age=admin.SESSION_S, httponly=True, samesite="strict")
+    return r
+
+
+@app.post("/api/admin/logout")
+def admin_logout(request: Request):
+    from fastapi.responses import JSONResponse
+    admin.logout(request.cookies.get("hid_admin"))
+    r = JSONResponse({"ok": True})
+    r.delete_cookie("hid_admin")
+    return r
+
+
+def admin_me_for(s: dict | None) -> dict:
+    import time as _t
+    u = store.get_user(s["user_id"]) if s else None
+    return {"user_id": s["user_id"] if s else None, "name": u["name"] if u else None,
+            "role": s["role"] if s else None, "role_name": admin.ROLES.get(s["role"]) if s else None,
+            "expires_in": int(s["expires"] - _t.time()) if s else 0,
+            "can_edit_policy": admin.allowed(s, "edit_policy") and node.ROLE != "edge",
+            "can_view_audit": admin.allowed(s, "view_audit"),
+            "can": {perm: admin.allowed(s, perm) for perm in admin.CAN},
+            "edge": node.ROLE == "edge", "bootstrap": admin.bootstrap_open(), "roles": admin.ROLES}
+
+
+@app.get("/api/admin/me")
+def admin_me(request: Request) -> dict:
+    return admin_me_for(_admin(request))
+
+
+@app.post("/api/users/{user_id}/admin_role")
+def set_admin_role(request: Request, user_id: str, role: str = Form("")) -> dict:
+    s = _admin(request)
+    if role and role not in admin.ROLES:
+        raise HTTPException(400, "unknown admin role")
+    if not store.get_user(user_id):
+        raise HTTPException(404, "unknown user")
+    first = admin.bootstrap_open() and role == "policy_admin"
+    if not (admin.allowed(s, "edit_policy") or first):
+        raise HTTPException(403, "Only a policy admin can grant or revoke admin roles")
+    if not store.get_user(user_id).get("totp_secret"):
+        raise HTTPException(400, "This person needs an authenticator app first (New QR on the Enroll page)")
+    store.set_admin_role(user_id, role or None)
+    by = s["user_id"] if s else "first-run setup"
+    store.append_audit(node.KIOSK_ID, None, user_id, "ROLE_CHANGED", "admin", node.mode(), None, None, None,
+                       [f"{admin.ROLES.get(role, 'no admin role')} granted by {by}"])
+    return {"ok": True}
+
+
+@app.put("/api/policy")
+def put_policy(request: Request, payload: dict = Body(...)) -> dict:
+    s = _require(request, "edit_policy")
+    if node.ROLE == "edge":
+        raise HTTPException(409, "This kiosk follows the central server's policy - edit it there")
+    current = policy.load()
+    new = {"timezone": current.get("timezone"), "grace_minutes": payload.get("grace_minutes", current.get("grace_minutes")),
+           "zones": current["zones"], "roles": current["roles"], "holidays": payload.get("holidays", current.get("holidays", []))}
+    for zid, sec in (payload.get("zone_security") or {}).items():
+        if zid in new["zones"]:
+            new["zones"][zid] = {**new["zones"][zid], "security": sec}
+    for rid, zones in (payload.get("windows") or {}).items():
+        if rid in new["roles"]:
+            new["roles"][rid] = {**new["roles"][rid], "zones": {z: [w.strip() for w in ws if w.strip()] for z, ws in zones.items()}}
+    try:
+        summary = policy.save_edit(new, s["user_id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if summary:
+        store.append_audit(node.KIOSK_ID, None, s["user_id"], "POLICY_CHANGED", "admin", node.mode(),
+                           None, None, None, summary)
+    return {"ok": True, "changes": summary}
 
 
 # ---------------------------------------------------------------- central-server sync API (shared key)
@@ -289,15 +427,19 @@ def sync_policy() -> Response:
 
 
 @app.post("/api/verify")
-async def verify(frames: list[UploadFile] = File(...), claimed_id: str = Form(""),
+async def verify(request: Request, frames: list[UploadFile] = File(...), claimed_id: str = Form(""),
                  challenge_id: str = Form(""), capture_ms: float = Form(0),
                  burst_id: str = Form(""), n_frames: int = Form(0),
                  zone: str = Form(""), at: str = Form("")) -> dict:
     """frames: the whole burst, or (streaming) just the last frame(s) with burst_id set
     and n_frames = total frames in the burst."""
     jpegs = await _read(frames)
-    return await run_in_threadpool(_verify, jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames,
-                                   zone or CFG["access"]["default_zone"], at)
+    staff = admin.allowed(_sess(request), "kiosk_controls")
+    if not staff:  # students can't pick another zone or fake the time
+        zone, at = _kiosk_zone(), ""
+    res = await run_in_threadpool(_verify, jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames,
+                                  zone or _kiosk_zone(), at)
+    return res if admin.allowed(_sess(request), "view_policy") else _public(res)
 
 
 @app.post("/api/burst/{burst_id}/frame")
@@ -435,7 +577,8 @@ def otp_verify(session_id: str = Form(...), code: str = Form(...)) -> dict:
 
 
 @app.get("/api/otp/outbox")
-def otp_outbox() -> list[dict]:
+def otp_outbox(request: Request) -> list[dict]:
+    _allow(request, "kiosk_controls")  # demo "phone": staff screen only
     return list(reversed(sessions.OUTBOX))
 
 
@@ -446,7 +589,8 @@ def timing(total_ms: float = Form(...)) -> dict:
 
 
 @app.get("/api/attempts")
-def attempts(limit: int = 50) -> list[dict]:
+def attempts(request: Request, limit: int = 50) -> list[dict]:
+    _require(request, "view_audit")
     return store.recent_attempts(limit)
 
 
@@ -455,13 +599,15 @@ def _clip_counts() -> dict:
 
 
 @app.get("/api/clips/counts")
-def clip_counts() -> dict:
+def clip_counts(request: Request) -> dict:
+    _allow(request, "manage_people")
     return _clip_counts()
 
 
 @app.post("/api/record")
-async def record(label: str = Form(...), subject: str = Form(...), capture_ms: float = Form(0),
+async def record(request: Request, label: str = Form(...), subject: str = Form(...), capture_ms: float = Form(0),
                  note: str = Form(""), frames: list[UploadFile] = File(...)) -> dict:
+    _allow(request, "manage_people")
     """Save a labelled test clip for eval/run_eval.py, and show what the kiosk would decide."""
     if label not in LABELS:
         raise HTTPException(400, f"label must be one of {LABELS}")
@@ -480,7 +626,8 @@ async def record(label: str = Form(...), subject: str = Form(...), capture_ms: f
 
 
 @app.get("/api/report")
-def report() -> dict:
+def report(request: Request) -> dict:
+    _allow(request, "view_results")
     import evaluation
     res = evaluation.load_results()
     if res is None:
@@ -489,7 +636,8 @@ def report() -> dict:
 
 
 @app.post("/api/eval/run")
-def eval_run() -> dict:
+def eval_run(request: Request) -> dict:
+    _allow(request, "run_eval")
     """Replays every recorded clip (takes ~0.4 s per clip; the kiosk waits meanwhile)."""
     import evaluation
     return evaluation.evaluate()

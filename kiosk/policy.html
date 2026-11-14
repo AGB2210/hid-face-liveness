@@ -9,15 +9,28 @@
 <body>
   <header>
     <span class="logo">HID</span><h1>Access policy</h1>
-    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html" class="active">Policy</a><a href="/audit.html">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+    <nav id="nav"></nav>
   </header>
   <main>
     <p class="small muted" id="meta" style="margin:0 0 28px"></p>
 
     <section class="card" style="overflow-x:auto">
-      <h2>Campus access schedule</h2>
+      <div class="row" style="justify-content:space-between;align-items:baseline">
+        <h2>Campus access schedule</h2>
+        <div class="row" id="editBar"></div>
+      </div>
       <table class="matrix" id="matrix"></table>
+      <div class="row hidden" id="extra" style="gap:28px;margin-top:18px;align-items:flex-end">
+        <label>Grace period (minutes) <input id="grace" type="number" min="0" max="240" style="width:120px" /></label>
+        <label style="flex:1">Holidays (YYYY-MM-DD, comma separated) <input id="holidays" /></label>
+      </div>
+      <p class="small" id="editMsg" style="margin:14px 0 0"></p>
       <p class="small muted" id="notes" style="margin-top:14px"></p>
+    </section>
+
+    <section class="card hidden" id="historyCard" style="margin-top:44px">
+      <h2>Recent schedule changes</h2>
+      <table id="history"></table>
     </section>
 
     <section class="card" style="margin-top:44px">
@@ -47,18 +60,76 @@
     </section>
   </main>
   <script type="module">
-    import { esc, framesForm, postForm } from "./common.js";
+    import { esc, framesForm, guard, halt, postForm, staffNav } from "./common.js";
     const $ = (id) => document.getElementById(id);
-    const pol = await (await fetch("/api/policy")).json();
+    const me = await staffNav("policy");
+    if (!guard(me, "view_policy")) await halt();
+    let pol = await (await fetch("/api/policy")).json();
     const users = await (await fetch("/api/users")).json();
-    const zones = Object.entries(pol.zones), roles = Object.entries(pol.roles);
+    let zones = Object.entries(pol.zones), roles = Object.entries(pol.roles);
 
     $("meta").textContent = `Timezone ${pol.timezone} · now ${pol.now} · grace period ${pol.grace_minutes} min · source: ${pol.source}`;
-    $("matrix").innerHTML = `<tr><th>Role</th>${zones.map(([, z]) => `<th>${esc(z.name)} <span class="tag ${z.security === "high" ? "high" : "std"}">${z.security === "high" ? "high" : "std"}</span></th>`).join("")}</tr>` +
-      roles.map(([rid, r]) => `<tr><td>${esc(r.name || rid)}${r.holidays_apply === false ? ' <span class="muted small">(works holidays)</span>' : ""}</td>${zones.map(([zid]) => {
-        const w = (r.zones || {})[zid];
-        return w ? `<td class="win">${w.map(esc).join("<br>")}</td>` : '<td class="none">·</td>';
-      }).join("")}</tr>`).join("");
+    let editing = false;
+    function renderMatrix() {
+      const head = zones.map(([zid, z]) => `<th>${esc(z.name)} ${editing
+        ? `<select data-sec="${esc(zid)}" class="small-sel"><option value="standard"${z.security !== "high" ? " selected" : ""}>std</option><option value="high"${z.security === "high" ? " selected" : ""}>high</option></select>`
+        : `<span class="tag ${z.security === "high" ? "high" : "std"}">${z.security === "high" ? "high" : "std"}</span>`}</th>`).join("");
+      $("matrix").innerHTML = `<tr><th>Role</th>${head}</tr>` +
+        roles.map(([rid, r]) => `<tr><td>${esc(r.name || rid)}${r.holidays_apply === false ? ' <span class="muted small">(works holidays)</span>' : ""}</td>${zones.map(([zid]) => {
+          const w = (r.zones || {})[zid];
+          if (editing) return `<td><input class="win-in" data-role="${esc(rid)}" data-zone="${esc(zid)}" value="${esc((w || []).join("; "))}" placeholder="no access" /></td>`;
+          return w ? `<td class="win">${w.map(esc).join("<br>")}</td>` : '<td class="none">·</td>';
+        }).join("")}</tr>`).join("");
+      $("extra").classList.toggle("hidden", !editing);
+      $("grace").value = pol.grace_minutes;
+      $("holidays").value = pol.holidays.join(", ");
+      const bar = $("editBar");
+      if (me.edge) bar.innerHTML = '<span class="small muted">This kiosk follows the central server\'s schedule - edit it there.</span>';
+      else if (!me.can.edit_policy) bar.innerHTML = '<span class="small muted">Read-only. Editing needs the Policy admin role.</span>';
+      else bar.innerHTML = editing
+        ? '<button id="save">Save changes</button><button class="secondary" id="cancel">Cancel</button>'
+        : '<button class="secondary" id="edit">Edit schedule</button>';
+    }
+    renderMatrix();
+
+    $("editBar").addEventListener("click", async (e) => {
+      if (e.target.id === "edit") { editing = true; $("editMsg").textContent = "Windows: e.g. Mon-Fri 09:00-17:00; Sat 10:00-14:00. Leave empty for no access."; $("editMsg").style.color = ""; renderMatrix(); }
+      if (e.target.id === "cancel") { editing = false; $("editMsg").textContent = ""; renderMatrix(); }
+      if (e.target.id === "save") {
+        const windows = {}, zone_security = {};
+        document.querySelectorAll("input.win-in").forEach((i) => {
+          (windows[i.dataset.role] ??= {})[i.dataset.zone] = i.value.split(";").map((x) => x.trim()).filter(Boolean);
+        });
+        document.querySelectorAll("select[data-sec]").forEach((sel) => (zone_security[sel.dataset.sec] = sel.value));
+        const body = { windows, zone_security, grace_minutes: parseInt($("grace").value, 10),
+          holidays: $("holidays").value.split(",").map((x) => x.trim()).filter(Boolean) };
+        const res = await fetch("/api/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          $("editMsg").textContent = `Not saved: ${out.detail || res.status}`;
+          $("editMsg").style.color = "var(--deny)";
+          return;
+        }
+        pol = await (await fetch("/api/policy")).json();
+        zones = Object.entries(pol.zones); roles = Object.entries(pol.roles);
+        editing = false;
+        renderMatrix();
+        $("editMsg").style.color = "var(--allow)";
+        $("editMsg").textContent = out.changes.length ? `Saved and logged: ${out.changes.slice(0, -1).join(" · ")}` : "No changes.";
+        $("meta").textContent = `Timezone ${pol.timezone} · now ${pol.now} · grace period ${pol.grace_minutes} min · source: ${pol.source}`;
+        loadHistory();
+      }
+    });
+
+    async function loadHistory() {
+      if (!me.can.view_audit) return;
+      const a = await (await fetch("/api/audit?limit=300")).json();
+      const ch = a.records.filter((r) => r.decision === "POLICY_CHANGED").slice(0, 8);
+      $("historyCard").classList.toggle("hidden", !ch.length);
+      $("history").innerHTML = "<tr><th>When</th><th>By</th><th>Changes</th></tr>" + ch.map((r) =>
+        `<tr><td class="mono">${new Date(r.ts * 1000).toLocaleString()}</td><td>${esc(r.user_id)}</td><td class="small">${r.reasons.map(esc).join("<br>")}</td></tr>`).join("");
+    }
+    loadHistory();
     $("notes").textContent = `Holidays (campus closed): ${pol.holidays.join(", ") || "none"}. High-security zones always need a second factor, and close entirely while offline.`;
 
     $("tUser").innerHTML = '<option value="">(use role)</option>' + users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("");

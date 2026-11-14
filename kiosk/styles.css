@@ -226,3 +226,11 @@ label.inline input:disabled { color: var(--muted); }
 .labels { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .labels button { text-align: left; padding: 14px 14px 12px; line-height: 1.25; }
 .labels button .n { display: block; font: 400 12px/1 var(--mono); opacity: .7; margin-top: 8px; }
+
+/* ---------- staff link in the nav --------------------------------------------- */
+header nav a.staff { margin-left: 12px; padding-left: 16px; border-left: 1px solid var(--line); }
+
+/* ---------- policy editing ------------------------------------------------------ */
+input.win-in { font: 400 12.5px/1.4 var(--mono); width: 100%; min-width: 150px; padding: 4px 0; }
+select.small-sel { font: 500 11px/1 var(--mono); padding: 2px 14px 2px 0; margin-left: 6px; }
+#editBar button { padding: 8px 14px; font-size: 13px; }

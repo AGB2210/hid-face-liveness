@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Staff Sign-in</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header><span class="logo">HID</span><h1>Staff</h1><nav id="nav"></nav></header>
+  <main style="max-width:560px">
+    <section class="card" id="signedIn" hidden>
+      <h2>Signed in</h2>
+      <dl class="readout" id="who"></dl>
+      <div class="row" style="margin-top:18px"><button id="out" class="secondary">Sign out</button></div>
+    </section>
+    <section class="card" id="signIn">
+      <h2>Staff sign-in</h2>
+      <form id="form" class="stack">
+        <label>User ID <input id="uid" required autocomplete="username" placeholder="your enrolled user ID" /></label>
+        <label>Authenticator code <input id="code" required inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="000000" /></label>
+        <button type="submit">Sign in</button>
+        <p class="small" id="msg" style="margin:0"></p>
+      </form>
+    </section>
+    <section class="card" style="margin-top:36px">
+      <h2>Roles</h2>
+      <table>
+        <tr><th>Role</th><th>Can</th></tr>
+        <tr><td>Policy admin</td><td>Everything: edit the access schedule, grant roles, audit log, enrollment, results</td></tr>
+        <tr><td>Operator</td><td>Enrollment desk: enroll people, record test clips, run the evaluation, kiosk demo controls</td></tr>
+        <tr><td>Auditor</td><td>Read-only: audit log, access schedule, results</td></tr>
+        <tr><td>Everyone else</td><td>The kiosk decision only</td></tr>
+      </table>
+      <p class="small muted" id="boot" style="margin-top:12px"></p>
+    </section>
+  </main>
+  <script type="module">
+    import { esc, framesForm, postForm, staffNav } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const next = new URLSearchParams(location.search).get("next");
+    async function show() {
+      const me = await staffNav("staff");
+      $("signedIn").hidden = !me.user_id;
+      $("signIn").hidden = !!me.user_id;
+      if (me.user_id) {
+        $("who").innerHTML = [["Name", me.name], ["User ID", me.user_id], ["Role", me.role_name],
+          ["Session ends in", `${Math.max(1, Math.round(me.expires_in / 60))} min`]]
+          .map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join("");
+      }
+      $("boot").textContent = me.bootstrap
+        ? "First-run setup: no policy admin exists yet. Enroll yourself on the Enroll page, then make yourself Policy admin there."
+        : "Roles are granted by a policy admin on the Enroll page. Every sign-in, failure and role change is written to the audit log.";
+    }
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await postForm("/api/admin/login", framesForm([], { user_id: $("uid").value.trim(), code: $("code").value }));
+        if (next && next.startsWith("/")) { location.href = next; return; }
+        $("msg").textContent = "";
+        show();
+      } catch (err) {
+        $("msg").textContent = err.message;
+        $("msg").style.color = "var(--deny)";
+        $("code").value = "";
+      }
+    });
+    $("out").addEventListener("click", async () => { await fetch("/api/admin/logout", { method: "POST" }); show(); });
+    show();
+  </script>
+</body>
+</html>

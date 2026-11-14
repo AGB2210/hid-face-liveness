@@ -1,11 +1,11 @@
-import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
+import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, staffNav, startCamera } from "./common.js";
 import { createTracker, hint, track } from "./facetrack.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
 const decisionEl = $("decision"), startBtn = $("start"), instruction = $("instruction");
 let cfg, busy = false, resetTimer = null, otpSession = null;
-let lastStatus = null, latest = null, armed = true, alignedSince = null, absentSince = null, lastOcclusion = null;
+let staff = false, lastStatus = null, latest = null, armed = true, alignedSince = null, absentSince = null, lastOcclusion = null;
 const CUE_LABEL = { blink: "Blink", turn_left: "Turn left", turn_right: "Turn right" };
 
 const store = {
@@ -94,7 +94,7 @@ function showDecision(res, totalMs) {
     ${rows.length ? `<dl class="readout">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
     ${totalMs ? `<p class="breakdown">capture ${Math.round(res.capture_ms || 0)} ms · server ${Math.round(t.processing || 0)} ms · network ${network} ms</p>` : ""}`;
   setCamState(st.cls);
-  $("debug").innerHTML = renderDebug(res);
+  if (staff) $("debug").innerHTML = renderDebug(res);
 }
 
 function idle(msg = "Look at the camera and press Start.") {
@@ -202,10 +202,10 @@ async function handleNext(res) {
       : app ? "Enter the 6-digit code from your authenticator app. It works without a network connection."
       : `Enter the code sent to ${o.sent_to}.`;
     $("otpCard").classList.remove("hidden");
-    $("phoneCard").classList.toggle("hidden", !sms);
+    $("phoneCard").classList.toggle("hidden", !(sms && staff));
     $("otpCode").value = "";
     $("otpCode").focus();
-    if (sms) refreshPhone();
+    if (sms && staff) refreshPhone();
     return;
   }
   banner.textContent = (res.reasons || [])[0] || "Please try again";
@@ -236,11 +236,6 @@ async function refreshPhone() {
     : '<span class="muted small">No messages</span>';
 }
 
-async function loadUsers() {
-  const users = await (await fetch("/api/users")).json();
-  $("claimed").innerHTML = '<option value="">None, search by face</option>' +
-    users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("");
-}
 
 $("simulate").addEventListener("click", async () => {
   await postForm("/api/node/simulate_offline", framesForm([], { on: $("simulate").dataset.on ? "false" : "true" }));
@@ -291,9 +286,18 @@ function onTrack(s) {
 }
 
 (async () => {
+  const me = await staffNav("kiosk");
+  staff = !!me.can?.kiosk_controls;
   cfg = await getConfig();
   initContext();
-  await loadUsers();
+  // Students and visitors only see the decision: no demo clock, zone picker, signals or SMS demo
+  document.querySelectorAll(".staffonly").forEach((el) => el.classList.toggle("hidden", !staff));
+  if (!staff) {
+    $("zone").classList.add("hidden");
+    $("zoneName").classList.remove("hidden");
+    $("zoneName").textContent = cfg.zones?.[cfg.default_zone]?.name || cfg.default_zone;
+    $("liveTime").checked = true;
+  }
   refreshStatus();
   setInterval(refreshStatus, 3000);
   try {

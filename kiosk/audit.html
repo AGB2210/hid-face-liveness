@@ -9,7 +9,7 @@
 <body>
   <header>
     <span class="logo">HID</span><h1>Audit log</h1>
-    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html">Policy</a><a href="/audit.html" class="active">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+    <nav id="nav"></nav>
   </header>
   <main>
     <section class="card">
@@ -28,8 +28,9 @@
     </section>
   </main>
   <script type="module">
-    import { esc } from "./common.js";
+    import { esc, guard, halt, staffNav } from "./common.js";
     const $ = (id) => document.getElementById(id);
+    if (!guard(await staffNav("audit"), "view_audit")) await halt();
     const SHORT = { ALLOW: "Allow", DENY: "Deny", REQUEST_VERIFICATION: "Step-up" };
     const t = (s) => (s ? new Date(s * 1000).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–");
 

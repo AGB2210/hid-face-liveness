@@ -9,7 +9,7 @@
 <body>
   <header>
     <span class="logo">HID</span><h1>Record test clips</h1>
-    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html">Policy</a><a href="/audit.html">Audit</a><a href="/record.html" class="active">Record</a><a href="/report.html">Results</a></nav>
+    <nav id="nav"></nav>
   </header>
   <main class="grid">
     <section class="stack">
@@ -40,8 +40,9 @@
     </section>
   </main>
   <script type="module">
-    import { captureBurst, esc, framesForm, getConfig, postForm, renderDebug, startCamera } from "./common.js";
+    import { captureBurst, esc, framesForm, getConfig, guard, halt, postForm, renderDebug, staffNav, startCamera } from "./common.js";
     const $ = (id) => document.getElementById(id);
+    if (!guard(await staffNav("record"), "manage_people")) await halt();
     const cfg = await getConfig();
     const NAMES = { live: "Live person", live_glasses: "Live, glasses", live_sunglasses: "Live, sunglasses", live_mask: "Live, face mask",
                     print: "Printed photo", screen_photo: "Screen (photo)", video_replay: "Video replay", mask: "Mask" };
