@@ -1,0 +1,41 @@
+# Campus access schedule. Each role lists, per zone, the weekly windows when entry is allowed.
+# Window format: "<days> HH:MM-HH:MM", days = Mon-Fri, Sat, Mon-Sun, Mon,Wed,Fri ...
+# The central server is the source of truth; edge kiosks cache a copy for offline use.
+
+timezone: Asia/Kolkata
+grace_minutes: 30            # just outside a window -> step-up verification instead of deny
+
+zones:
+  main-gate:   {name: Main gate,   security: standard}
+  library:     {name: Library,     security: standard}
+  lab-3:       {name: Lab 3,       security: high}      # high: always needs a second factor
+  server-room: {name: Server room, security: high}
+
+roles:
+  student:
+    name: Student
+    zones:
+      main-gate: ["Mon-Sun 06:00-23:00"]
+      library:   ["Mon-Sat 08:00-22:00"]
+      lab-3:     ["Mon-Fri 09:00-17:00"]
+  staff:
+    name: Staff
+    holidays_apply: false
+    zones:
+      main-gate:   ["Mon-Sun 00:00-24:00"]
+      library:     ["Mon-Sun 07:00-23:00"]
+      lab-3:       ["Mon-Sat 07:00-21:00"]
+      server-room: ["Mon-Fri 09:00-18:00"]
+  contractor:
+    name: Contractor
+    zones:
+      main-gate:   ["Mon-Fri 08:00-18:00"]
+      server-room: ["Mon-Fri 10:00-16:00"]
+  visitor:
+    name: Visitor
+    zones:
+      main-gate: ["Mon-Fri 09:00-17:00"]
+
+holidays:                    # campus closed (roles with holidays_apply: false are exempt)
+  - "2026-11-26"
+  - "2026-12-25"

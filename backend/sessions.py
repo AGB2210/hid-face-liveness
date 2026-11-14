@@ -43,31 +43,47 @@ def take_challenge(cid: str) -> dict | None:
     return None
 
 
-def new_otp(user_id: str, name: str, phone: str | None) -> dict:
-    code = "".join(secrets.choice("0123456789") for _ in range(CFG["challenge"]["otp_digits"]))
+def new_otp(user_id: str, name: str, phone: str | None, sms: bool = True,
+            totp_secret: str | None = None, context: dict | None = None) -> dict:
+    """Second-factor session. Accepts the SMS code (online only) or the user's authenticator
+    app code (TOTP - works with no network, used by the offline fail-safe flow)."""
+    code = "".join(secrets.choice("0123456789") for _ in range(CFG["challenge"]["otp_digits"])) if sms else None
     sid = uuid.uuid4().hex
     with _lock:
-        _otps[sid] = {"user_id": user_id, "code": code, "tries": 0,
-                      "expires": time.time() + 120}
-        OUTBOX.append({"ts": time.time(), "to": phone or f"{name}'s registered phone",
-                       "text": f"HID kiosk access code: {code}"})
-        del OUTBOX[:-10]
-    return {"session_id": sid, "sent_to": phone or "registered phone"}
+        _otps[sid] = {"user_id": user_id, "code": code, "totp": totp_secret, "tries": 0,
+                      "expires": time.time() + 120, "context": context or {}}
+        if sms:
+            OUTBOX.append({"ts": time.time(), "to": phone or f"{name}'s registered phone",
+                           "text": f"HID kiosk access code: {code}"})
+            del OUTBOX[:-10]
+    methods = (["sms"] if sms else []) + (["authenticator"] if totp_secret else [])
+    return {"session_id": sid, "sent_to": (phone or "registered phone") if sms else None, "methods": methods}
 
 
-def check_otp(sid: str, code: str) -> tuple[bool, str | None, str]:
+def _code_ok(rec: dict, code: str) -> bool:
+    code = code.strip().replace(" ", "")
+    if rec["code"] and secrets.compare_digest(rec["code"], code):
+        return True
+    if rec["totp"]:
+        import pyotp
+        return pyotp.TOTP(rec["totp"]).verify(code, valid_window=1)
+    return False
+
+
+def check_otp(sid: str, code: str) -> tuple[bool, str | None, str, dict]:
     with _lock:
         rec = _otps.get(sid)
         if not rec:
-            return False, None, "Verification session not found"
+            return False, None, "Verification session not found", {}
+        ctx = rec["context"]
         if rec["expires"] < time.time():
             _otps.pop(sid, None)
-            return False, rec["user_id"], "Code expired"
+            return False, rec["user_id"], "Code expired", ctx
         rec["tries"] += 1
-        if secrets.compare_digest(rec["code"], code.strip()):
+        if _code_ok(rec, code):
             _otps.pop(sid, None)
-            return True, rec["user_id"], "Code accepted"
+            return True, rec["user_id"], "Second factor confirmed", ctx
         if rec["tries"] >= CFG["challenge"]["max_otp_tries"]:
             _otps.pop(sid, None)
-            return False, rec["user_id"], "Too many wrong codes"
-        return False, rec["user_id"], "WRONG_CODE"
+            return False, rec["user_id"], "Too many wrong codes", ctx
+        return False, rec["user_id"], "WRONG_CODE", ctx

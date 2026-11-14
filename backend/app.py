@@ -16,12 +16,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile  # noqa: E402
 from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 import bursts  # noqa: E402
+import node  # noqa: E402
+import policy  # noqa: E402
 import sessions  # noqa: E402
 import store  # noqa: E402
 from pipeline import engine  # noqa: E402
@@ -49,6 +51,11 @@ LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 async def access_gate(request: Request, call_next):
     """Simple shared-password gate for the public deployment (HID_PASSWORD)."""
     path = request.url.path
+    if path.startswith("/api/sync/"):
+        key = os.environ.get("HID_SYNC_KEY", "")
+        if not key or not secrets.compare_digest(request.headers.get("x-hid-sync-key", ""), key):
+            return Response('{"detail":"sync key required"}', status_code=401, media_type="application/json")
+        return await call_next(request)
     if PASSWORD and path not in ("/login", "/styles.css") and             not secrets.compare_digest(request.cookies.get("hid_auth", ""), AUTH_TOKEN):
         if path.startswith("/api/"):
             return Response('{"detail":"login required"}', status_code=401, media_type="application/json")
@@ -72,6 +79,7 @@ def login(password: str = Form(...)):
 @app.on_event("startup")
 def _warm() -> None:
     warmup()  # load and run every model once so the first user isn't slow
+    node.start()  # central-server monitor + audit sync (edge kiosks)
 
 
 async def _read(frames: list[UploadFile]) -> list[bytes]:
@@ -82,8 +90,10 @@ async def _read(frames: list[UploadFile]) -> list[bytes]:
 
 @app.get("/api/config")
 def config() -> dict:
+    pol = node.current_policy()
     return {"capture": CFG["capture"], "labels": LABELS, "actions": sessions.ACTIONS,
-            "identity_provider": provider_name()}
+            "identity_provider": provider_name(), "zones": policy.zones(pol), "roles": policy.roles(pol),
+            "default_zone": CFG["access"]["default_zone"], "node": node.status()}
 
 
 @app.post("/api/config/reload")
@@ -105,6 +115,7 @@ def delete_user(user_id: str) -> dict:
 
 @app.post("/api/enroll")
 async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = Form(""),
+                 role: str = Form("student"), valid_until: str = Form(""),
                  frames: list[UploadFile] = File(...)) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", user_id):
         raise HTTPException(400, "user_id: letters, digits, _ . - only")
@@ -121,17 +132,105 @@ async def enroll(user_id: str = Form(...), name: str = Form(...), phone: str = F
             raise HTTPException(422, str(e))
         except Exception as e:  # AWS credentials / network
             raise HTTPException(502, f"Identity provider error: {type(e).__name__}: {e}"[:300])
-    return {"ok": True, "user_id": user_id, "templates": n, "provider": provider_name()}
+    store.set_access(user_id, role, valid_until or None)
+    return {"ok": True, "user_id": user_id, "templates": n, "provider": provider_name(),
+            "authenticator": _new_totp(user_id, name)}
+
+
+def _new_totp(user_id: str, name: str) -> dict:
+    """Authenticator-app second factor: works with no network, so the offline flow can use it."""
+    import io
+
+    import pyotp
+    import qrcode
+    import qrcode.image.svg
+    secret = pyotp.random_base32()
+    store.set_totp(user_id, secret)
+    uri = pyotp.TOTP(secret).provisioning_uri(name=f"{name} ({user_id})", issuer_name="HID Kiosk")
+    buf = io.BytesIO()
+    qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2).save(buf)
+    return {"uri": uri, "svg": buf.getvalue().decode()}
+
+
+@app.post("/api/users/{user_id}/access")
+def set_access(user_id: str, role: str = Form(...), valid_until: str = Form("")) -> dict:
+    if not store.get_user(user_id):
+        raise HTTPException(404, "unknown user")
+    if role not in policy.roles(node.current_policy()):
+        raise HTTPException(400, "unknown role")
+    store.set_access(user_id, role, valid_until or None)
+    return {"ok": True}
+
+
+@app.post("/api/users/{user_id}/authenticator")
+def reset_authenticator(user_id: str) -> dict:
+    u = store.get_user(user_id)
+    if not u:
+        raise HTTPException(404, "unknown user")
+    return _new_totp(user_id, u["name"])
+
+
+# ---------------------------------------------------------------- policy, node, audit
+@app.get("/api/policy")
+def get_policy() -> dict:
+    pol = node.current_policy()
+    return {"zones": pol["zones"], "roles": pol["roles"], "timezone": pol.get("timezone"),
+            "grace_minutes": pol.get("grace_minutes"), "holidays": [str(h) for h in pol.get("holidays", [])],
+            "source": pol.get("_source"), "now": policy.now(pol).strftime("%a %d %b %Y %H:%M")}
+
+
+@app.post("/api/policy/test")
+def policy_test(zone: str = Form(...), user_id: str = Form(""), role: str = Form(""),
+                valid_until: str = Form(""), at: str = Form("")) -> dict:
+    user = store.get_user(user_id) if user_id else {"role": role or "visitor", "valid_until": valid_until or None}
+    return policy.evaluate(user, zone, at or None, node.current_policy())
+
+
+@app.get("/api/node/status")
+def node_status() -> dict:
+    return node.status()
+
+
+@app.post("/api/node/simulate_offline")
+def simulate_offline(on: bool = Form(...)) -> dict:
+    node.simulate_offline(on)
+    return node.status()
+
+
+@app.get("/api/audit")
+def audit(limit: int = 200) -> dict:
+    return {"records": store.list_audit(limit), "chains": store.verify_chains(), "node": node.status()}
+
+
+# ---------------------------------------------------------------- central-server sync API (shared key)
+@app.get("/api/sync/health")
+def sync_health() -> dict:
+    return {"ok": True, "role": node.ROLE}
+
+
+@app.post("/api/sync/audit")
+def sync_audit(payload: dict = Body(...)) -> dict:
+    recs = payload.get("records", [])
+    stored = store.ingest_audit(recs)
+    valid = [r["id"] for r in recs if r.get("hash") == store._hash(r)]
+    return {"stored": stored, "ids": valid}
+
+
+@app.get("/api/sync/policy")
+def sync_policy() -> Response:
+    return Response(policy.policy_text(), media_type="text/yaml")
 
 
 @app.post("/api/verify")
 async def verify(frames: list[UploadFile] = File(...), claimed_id: str = Form(""),
                  challenge_id: str = Form(""), capture_ms: float = Form(0),
-                 burst_id: str = Form(""), n_frames: int = Form(0)) -> dict:
+                 burst_id: str = Form(""), n_frames: int = Form(0),
+                 zone: str = Form(""), at: str = Form("")) -> dict:
     """frames: the whole burst, or (streaming) just the last frame(s) with burst_id set
     and n_frames = total frames in the burst."""
     jpegs = await _read(frames)
-    return await run_in_threadpool(_verify, jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames)
+    return await run_in_threadpool(_verify, jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames,
+                                   zone or CFG["access"]["default_zone"], at)
 
 
 @app.post("/api/burst/{burst_id}/frame")
@@ -142,7 +241,7 @@ async def burst_frame(burst_id: str, idx: int = Form(...), frame: UploadFile = F
     return await run_in_threadpool(bursts.add_frame, burst_id, idx, await frame.read())
 
 
-def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames) -> dict:
+def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames, zone, at) -> dict:
     pre, pre_ms = [], 0.0
     if burst_id:
         if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", burst_id):
@@ -155,13 +254,18 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames) -> 
             raise HTTPException(410, "Challenge expired or already used - start again")
         claimed_id = claimed_id or challenge.get("claimed_id") or ""
 
+    offline = node.offline()
     res = engine.analyse(jpegs, claimed_id or None, challenge, pre_frames=pre,
-                         first_idx=(n_frames - len(jpegs)) if burst_id else None)
+                         first_idx=(n_frames - len(jpegs)) if burst_id else None,
+                         # offline: the cloud matcher is unreachable -> on-device template cache
+                         provider_name="local_arcface" if offline else None)
     res["stage"] = "challenge" if challenge else "passive"
     res["capture_ms"] = capture_ms
     if burst_id:
         res["timing_ms"]["streamed_frames"] = len(pre)
         res["timing_ms"]["analysed_during_capture"] = round(pre_ms, 1)
+
+    _apply_context(res, zone, at or None, offline)
 
     if res["decision"] == engine.VERIFY and res["next"] == "challenge":
         cand = res["identity"]["user_id"] if res.get("identity") else None
@@ -170,11 +274,14 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames) -> 
             "id": ch["id"], "action": ch["action"], "instruction": ch["instruction"],
             "duration_ms": CFG["capture"]["challenge_duration_ms"],
             "frames": CFG["capture"]["challenge_frames"]}
-    elif res["decision"] == engine.VERIFY and res["next"] == "otp":
+    elif res["decision"] == engine.VERIFY and res["next"] in ("otp", "second_factor"):
         ident = res.get("identity") or {}
         user = store.get_user(ident["user_id"]) if ident.get("user_id") else None
         if user:
-            res["otp_request"] = sessions.new_otp(user["id"], user["name"], user.get("phone"))
+            res["otp_request"] = sessions.new_otp(
+                user["id"], user["name"], user.get("phone"), sms=not offline, totp_secret=user.get("totp_secret"),
+                context={"zone": zone, "schedule": (res.get("context") or {}).get("verdict"), "mode": res["mode"],
+                         "liveness": (res.get("liveness") or {}).get("score"), "similarity": ident.get("similarity")})
         else:
             res.update(decision=engine.DENY, reasons=["Identity could not be established"], next=None)
 
@@ -182,19 +289,68 @@ def _verify(jpegs, claimed_id, challenge_id, capture_ms, burst_id, n_frames) -> 
     store.log_attempt(res["decision"], res["stage"], ident.get("user_id"), ident.get("similarity"),
                       (res.get("liveness") or {}).get("score"), res["timing_ms"]["processing"],
                       None, res["reasons"])
+    store.append_audit(node.KIOSK_ID, zone, ident.get("user_id"), res["decision"], res["stage"], res["mode"],
+                       (res.get("liveness") or {}).get("score"), ident.get("similarity"),
+                       (res.get("context") or {}).get("verdict"), res["reasons"])
     return res
+
+
+def _apply_context(res: dict, zone: str, at: str | None, offline: bool) -> None:
+    """Biometrics say who is there and that they are live; the schedule says whether they may
+    enter here, now. Offline, the kiosk never fails open: high-security zones close, and every
+    other entry needs the authenticator-app code on top of liveness + the cached template."""
+    res["mode"] = "offline" if offline else "online"
+    ident = res.get("identity") or {}
+    user = store.get_user(ident["user_id"]) if ident.get("user_id") else None
+    if res["decision"] == engine.DENY or not user:
+        if offline and res["decision"] != engine.DENY:
+            res.update(decision=engine.DENY, next=None,
+                       reasons=["Offline fail-safe: identity could not be confirmed on this device"])
+        return
+    ctx = policy.evaluate(user, zone, at, node.current_policy())
+    res["context"] = ctx
+    if ctx["verdict"] == "outside":
+        res.update(decision=engine.DENY, next=None, reasons=[ctx["reason"]])
+        return
+    if offline:
+        age = store.template_age_days(user["id"])
+        if ctx["security"] == "high":
+            why = f"{ctx['zone_name']} is high-security: closed while the central server is unreachable"
+        elif age is None or age > CFG["access"]["offline_template_ttl_days"]:
+            why = "Offline template cache expired - re-enroll when back online"
+        elif not user.get("totp_secret"):
+            why = "Offline: no authenticator app enrolled for the second factor"
+        else:
+            why = None
+        if why:
+            res.update(decision=engine.DENY, next=None, reasons=[f"Offline fail-safe: {why}"])
+        else:
+            res.update(decision=engine.VERIFY, next="second_factor",
+                       reasons=["Offline fail-safe: enter the code from your authenticator app", ctx["reason"]])
+        return
+    if res["decision"] == engine.ALLOW:
+        if ctx["verdict"] == "grace":
+            res.update(decision=engine.VERIFY, next="second_factor", reasons=[f"Step-up: {ctx['reason']}"])
+        elif ctx["security"] == "high":
+            res.update(decision=engine.VERIFY, next="second_factor",
+                       reasons=[f"Step-up: {ctx['zone_name']} is high-security - second factor required"])
+        else:
+            res["reasons"] = res["reasons"] + [ctx["reason"]]
 
 
 @app.post("/api/otp/verify")
 def otp_verify(session_id: str = Form(...), code: str = Form(...)) -> dict:
-    ok, user_id, msg = sessions.check_otp(session_id, code)
+    ok, user_id, msg, ctx = sessions.check_otp(session_id, code)
     if msg == "WRONG_CODE":
         return {"decision": None, "retry": True, "reasons": ["Wrong code - try again"]}
     user = store.get_user(user_id) if user_id else None
     decision = "ALLOW" if ok else "DENY"
-    reasons = ["Identity confirmed by one-time code"] if ok else [msg]
-    store.log_attempt(decision, "otp", user_id, None, None, 0, None, reasons)
-    return {"decision": decision, "reasons": reasons,
+    mode = ctx.get("mode", node.mode())
+    reasons = ([f"Second factor confirmed{' (offline)' if mode == 'offline' else ''}"] if ok else [msg])
+    store.log_attempt(decision, "second_factor", user_id, None, None, 0, None, reasons)
+    store.append_audit(node.KIOSK_ID, ctx.get("zone"), user_id, decision, "second_factor", mode,
+                       ctx.get("liveness"), ctx.get("similarity"), ctx.get("schedule"), reasons)
+    return {"decision": decision, "reasons": reasons, "mode": mode,
             "identity": {"user_id": user_id, "name": user["name"] if user else None}}
 
 

@@ -81,3 +81,7 @@ profiles:
       jpeg_quality: 0.85
     quality:
       min_face_px: 90     # scaled for 640-px frames
+
+access:
+  default_zone: main-gate           # zone a kiosk guards unless it picks another
+  offline_template_ttl_days: 7      # on-device face templates older than this are not trusted offline

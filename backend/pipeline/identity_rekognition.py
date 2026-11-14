@@ -58,8 +58,10 @@ class Rekognition(IdentityProvider):
     # -- IdentityProvider -------------------------------------------------------------
     def enroll(self, user_id, name, phone, frames):
         import store
+        from .identity import LocalArcFace
         crops = save_enrollment_crops(user_id, frames)
-        store.upsert_user_meta(user_id, name, phone)
+        # also keep on-device ArcFace templates: the offline fail-safe matches against these
+        store.upsert_user(user_id, name, phone, LocalArcFace()._embed(frames))
         ids = self.index_crops(user_id, crops)
         if not ids:
             raise ValueError("Rekognition rejected every face crop (quality too low) - try better light")

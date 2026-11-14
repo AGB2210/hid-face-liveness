@@ -8,9 +8,21 @@
 </head>
 <body>
   <header>
-    <span class="logo">HID</span><h1>Liveness check</h1>
-    <nav><a href="/" class="active">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+    <span class="logo">HID</span><h1>Access kiosk</h1>
+    <nav><a href="/" class="active">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html">Policy</a><a href="/audit.html">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
   </header>
+
+  <div class="contextbar">
+    <label class="inline">Zone <select id="zone"></select></label>
+    <label class="inline">Time
+      <input type="datetime-local" id="at" />
+      <span class="check"><input type="checkbox" id="liveTime" checked /> live</span>
+    </label>
+    <span class="spacer"></span>
+    <span class="net on" id="netStatus"><i></i>Checking connection</span>
+    <button class="secondary small-btn" id="simulate">Simulate network loss</button>
+  </div>
+
   <main class="grid">
     <section class="stack">
       <div class="cam" id="cam">
@@ -25,7 +37,7 @@
           <button id="start">Start check<kbd>Space</kbd></button>
           <button class="secondary" id="toggleDebug">Signals</button>
         </div>
-        <label style="flex-direction:row;align-items:center;gap:10px">Badge
+        <label class="inline">Badge
           <select id="claimed"><option value="">None, search by face</option></select>
         </label>
       </div>
@@ -39,10 +51,10 @@
       </div>
 
       <div class="card otp hidden" id="otpCard">
-        <h2>One-time code</h2>
+        <h2>Second factor</h2>
         <form id="otpForm" class="stack">
           <p class="small muted" id="otpSent" style="margin:0"></p>
-          <input id="otpCode" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="000000" aria-label="One-time code" />
+          <input id="otpCode" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="000000" aria-label="Verification code" />
           <button type="submit">Verify code</button>
         </form>
       </div>

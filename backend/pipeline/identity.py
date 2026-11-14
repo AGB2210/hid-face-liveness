@@ -21,8 +21,8 @@ def provider_name() -> str:
     return os.environ.get("HID_IDENTITY") or CFG["identity"]["provider"]
 
 
-def identity_thresholds() -> dict:
-    name = provider_name()
+def identity_thresholds(name: str | None = None) -> dict:
+    name = name or provider_name()
     return {"provider": name, **{k: CFG["identity"][name][k] for k in ("match", "borderline")}}
 
 
@@ -113,5 +113,5 @@ def _make(name: str) -> IdentityProvider:
     return LocalArcFace()
 
 
-def get_provider() -> IdentityProvider:
-    return _make(provider_name())
+def get_provider(name: str | None = None) -> IdentityProvider:
+    return _make(name or provider_name())

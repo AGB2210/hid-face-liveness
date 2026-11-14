@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Access Policy</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Access policy</h1>
+    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html" class="active">Policy</a><a href="/audit.html">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+  </header>
+  <main>
+    <p class="small muted" id="meta" style="margin:0 0 28px"></p>
+
+    <section class="card" style="overflow-x:auto">
+      <h2>Campus access schedule</h2>
+      <table class="matrix" id="matrix"></table>
+      <p class="small muted" id="notes" style="margin-top:14px"></p>
+    </section>
+
+    <section class="card" style="margin-top:44px">
+      <h2>How a decision is made</h2>
+      <table>
+        <tr><th>Biometrics</th><th>Schedule</th><th>Online</th><th>Offline (central unreachable)</th></tr>
+        <tr><td>Live and matched</td><td>Inside window, standard zone</td><td><span class="pill ALLOW">Allow</span></td><td><span class="pill REQUEST_VERIFICATION">Step-up</span> authenticator code</td></tr>
+        <tr><td>Live and matched</td><td>Grace period, or high-security zone</td><td><span class="pill REQUEST_VERIFICATION">Step-up</span> SMS or authenticator</td><td>Grace: <span class="pill REQUEST_VERIFICATION">Step-up</span> · High security: <span class="pill DENY">Deny</span></td></tr>
+        <tr><td>Live and matched</td><td>Outside window, no zone access, expired, holiday</td><td><span class="pill DENY">Deny</span></td><td><span class="pill DENY">Deny</span></td></tr>
+        <tr><td>Borderline</td><td>Inside or grace</td><td><span class="pill REQUEST_VERIFICATION">Step-up</span> challenge, then code</td><td><span class="pill REQUEST_VERIFICATION">Step-up</span> authenticator code</td></tr>
+        <tr><td>Spoof or no match</td><td>Not checked</td><td><span class="pill DENY">Deny</span></td><td><span class="pill DENY">Deny</span></td></tr>
+      </table>
+      <p class="small muted" style="margin-top:14px">Offline, the kiosk never fails open: it matches against on-device face templates (no images),
+        requires a second factor that works without a network, and queues a hash-chained audit record for every decision until the central server is back.</p>
+    </section>
+
+    <section class="card" style="margin-top:44px">
+      <h2>Test a decision</h2>
+      <form id="test" class="row" style="gap:24px;align-items:flex-end">
+        <label>Person <select id="tUser"></select></label>
+        <label>or role <select id="tRole"></select></label>
+        <label>Zone <select id="tZone"></select></label>
+        <label>Time <input type="datetime-local" id="tAt" required /></label>
+        <button type="submit">Evaluate</button>
+      </form>
+      <div id="tOut" style="margin-top:22px"></div>
+    </section>
+  </main>
+  <script type="module">
+    import { esc, framesForm, postForm } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const pol = await (await fetch("/api/policy")).json();
+    const users = await (await fetch("/api/users")).json();
+    const zones = Object.entries(pol.zones), roles = Object.entries(pol.roles);
+
+    $("meta").textContent = `Timezone ${pol.timezone} · now ${pol.now} · grace period ${pol.grace_minutes} min · source: ${pol.source}`;
+    $("matrix").innerHTML = `<tr><th>Role</th>${zones.map(([, z]) => `<th>${esc(z.name)} <span class="tag ${z.security === "high" ? "high" : "std"}">${z.security === "high" ? "high" : "std"}</span></th>`).join("")}</tr>` +
+      roles.map(([rid, r]) => `<tr><td>${esc(r.name || rid)}${r.holidays_apply === false ? ' <span class="muted small">(works holidays)</span>' : ""}</td>${zones.map(([zid]) => {
+        const w = (r.zones || {})[zid];
+        return w ? `<td class="win">${w.map(esc).join("<br>")}</td>` : '<td class="none">·</td>';
+      }).join("")}</tr>`).join("");
+    $("notes").textContent = `Holidays (campus closed): ${pol.holidays.join(", ") || "none"}. High-security zones always need a second factor, and close entirely while offline.`;
+
+    $("tUser").innerHTML = '<option value="">(use role)</option>' + users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join("");
+    $("tRole").innerHTML = roles.map(([k, r]) => `<option value="${esc(k)}">${esc(r.name || k)}</option>`).join("");
+    $("tZone").innerHTML = zones.map(([k, z]) => `<option value="${esc(k)}">${esc(z.name)}</option>`).join("");
+    const pad = (n) => String(n).padStart(2, "0"), d = new Date();
+    $("tAt").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+    $("test").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const r = await postForm("/api/policy/test", framesForm([], { user_id: $("tUser").value, role: $("tRole").value, zone: $("tZone").value, at: $("tAt").value }));
+      const high = r.security === "high";
+      const online = r.verdict === "outside" ? ["DENY", "Deny"] : (r.verdict === "grace" || high) ? ["REQUEST_VERIFICATION", "Step-up"] : ["ALLOW", "Allow"];
+      const offline = r.verdict === "outside" || high ? ["DENY", "Deny"] : ["REQUEST_VERIFICATION", "Step-up"];
+      $("tOut").innerHTML = `<div class="verdict ${r.verdict}">${{ inside: "Within access window", grace: "Grace period", outside: "Outside access window" }[r.verdict]}</div>
+        <p class="small" style="margin:6px 0 14px">${esc(r.reason)} · ${esc(r.time)}${r.role ? " · " + esc(r.role) : ""}</p>
+        <dl class="readout" style="max-width:520px">
+          <div><dt>If live and matched, online</dt><dd><span class="pill ${online[0]}">${online[1]}</span></dd></div>
+          <div><dt>If live and matched, offline</dt><dd><span class="pill ${offline[0]}">${offline[1]}</span></dd></div>
+        </dl>`;
+    });
+  </script>
+</body>
+</html>

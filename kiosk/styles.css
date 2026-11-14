@@ -178,6 +178,37 @@ td b { font-family: var(--mono); font-weight: 500; }
 .phone { border: 1px solid var(--line-strong); border-radius: 14px; padding: 14px; font-size: 14px; min-height: 80px; max-width: 320px; }
 .phone .sms { border-left: 2px solid var(--accent); padding: 4px 0 4px 10px; margin-top: 8px; font-family: var(--mono); }
 
+/* ---------- kiosk context bar --------------------------------------------------- */
+.contextbar {
+  display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+  max-width: 1240px; margin: 0 auto; padding: 14px 32px; border-bottom: 1px solid var(--line);
+}
+.contextbar .spacer { flex: 1; }
+label.inline { flex-direction: row; align-items: center; gap: 10px; }
+label.inline input[type="datetime-local"] { font: 400 14px/1.2 var(--mono); padding: 4px 0; }
+label.inline input:disabled { color: var(--muted); }
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.check input { accent-color: var(--ink); }
+.net { display: inline-flex; align-items: center; gap: 8px; font: 500 12px/1 var(--mono); letter-spacing: .04em; }
+.net i { width: 8px; height: 8px; border-radius: 50%; background: var(--allow); display: inline-block; }
+.net.off { color: var(--deny); }
+.net.off i { background: var(--deny); animation: blink 1.2s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+.small-btn { padding: 8px 12px; font-size: 12.5px; }
+@media (max-width: 920px) { .contextbar { padding: 12px 16px; gap: 14px; } }
+
+/* ---------- policy matrix ----------------------------------------------------------- */
+.matrix td, .matrix th { white-space: nowrap; }
+.matrix td.win { font: 400 12.5px/1.5 var(--mono); }
+.matrix td.none { color: var(--line-strong); }
+.tag { font: 500 10.5px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; border: 1px solid currentColor; padding: 3px 5px; border-radius: 2px; }
+.tag.high { color: var(--deny); }
+.tag.std { color: var(--muted); }
+.qr { width: 180px; height: 180px; background: #fff; padding: 6px; border: 1px solid var(--line); }
+.qr svg { width: 100%; height: 100%; display: block; }
+.verdict { font: 500 22px/1.2 var(--sans); }
+.verdict.inside { color: var(--allow); } .verdict.grace { color: var(--verify); } .verdict.outside { color: var(--deny); }
+
 /* ---------- record page label grid -------------------------------------------- */
 .labels { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .labels button { text-align: left; padding: 14px 14px 12px; line-height: 1.25; }

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HID Audit Log</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <span class="logo">HID</span><h1>Audit log</h1>
+    <nav><a href="/">Kiosk</a><a href="/enroll.html">Enroll</a><a href="/policy.html">Policy</a><a href="/audit.html" class="active">Audit</a><a href="/record.html">Record</a><a href="/report.html">Results</a></nav>
+  </header>
+  <main>
+    <section class="card">
+      <h2>This node</h2>
+      <dl class="readout" id="node" style="max-width:640px"></dl>
+    </section>
+    <section class="card" style="margin-top:44px">
+      <h2>Integrity (hash chain per kiosk)</h2>
+      <table id="chains"></table>
+      <p class="small muted" style="margin-top:12px">Each record stores the hash of the previous one. Editing a record breaks its hash;
+        deleting one leaves a gap. Records hold decision metadata only: no images, no face templates.</p>
+    </section>
+    <section class="card" style="margin-top:44px;overflow-x:auto">
+      <h2>Decisions</h2>
+      <table id="rows"></table>
+    </section>
+  </main>
+  <script type="module">
+    import { esc } from "./common.js";
+    const $ = (id) => document.getElementById(id);
+    const SHORT = { ALLOW: "Allow", DENY: "Deny", REQUEST_VERIFICATION: "Step-up" };
+    const t = (s) => (s ? new Date(s * 1000).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–");
+
+    async function load() {
+      const a = await (await fetch("/api/audit?limit=300")).json();
+      const n = a.node;
+      $("node").innerHTML = [
+        ["Role", n.role === "edge" ? "Edge kiosk" : n.role === "central" ? "Central server" : "Standalone"],
+        ["Kiosk ID", n.kiosk],
+        ["Connection", n.mode === "offline" ? `<span style="color:var(--deny)">Offline · fail-safe mode</span>` : "Online"],
+        ["Central server", n.central || "–"],
+        ["Waiting to sync", n.pending],
+        ["Offline decisions recorded", n.offline_decisions],
+        ["Last sync", t(n.last_sync)],
+        ["Policy source", n.policy_source],
+      ].map(([k, v]) => `<div><dt>${k}</dt><dd>${typeof v === "string" && v.startsWith("<span") ? v : esc(v)}</dd></div>`).join("");
+      const ch = Object.entries(a.chains);
+      $("chains").innerHTML = "<tr><th>Kiosk</th><th>Records</th><th>Hashes</th><th>Gaps</th></tr>" + (ch.length
+        ? ch.map(([k, c]) => `<tr><td class="mono">${esc(k)}</td><td>${c.records}</td><td>${c.intact ? '<span class="pill ALLOW">Intact</span>' : '<span class="pill DENY">Tampered</span>'}</td><td>${c.gaps}</td></tr>`).join("")
+        : '<tr><td colspan="4" class="muted">No records yet</td></tr>');
+      $("rows").innerHTML = "<tr><th>Time</th><th>Kiosk</th><th>Zone</th><th>Person</th><th>Decision</th><th>Stage</th><th>Mode</th><th>Schedule</th><th>Synced</th><th>Reason</th></tr>" +
+        a.records.map((r) => `<tr><td class="mono">${t(r.ts)}</td><td class="mono">${esc(r.kiosk)}</td><td>${esc(r.zone || "–")}</td><td>${esc(r.user_id || "–")}</td>
+          <td><span class="pill ${r.decision}">${SHORT[r.decision] || r.decision}</span></td><td>${esc(r.stage)}</td>
+          <td>${r.mode === "offline" ? '<b style="color:var(--verify)">offline</b>' : "online"}</td><td>${esc(r.schedule || "–")}</td>
+          <td class="mono">${r.received ? "received " + t(r.received) : r.synced ? "yes" : n.role === "edge" ? "queued" : "–"}</td>
+          <td class="small muted">${esc((r.reasons || []).join("; "))}</td></tr>`).join("");
+    }
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>

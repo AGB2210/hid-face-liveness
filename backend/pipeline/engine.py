@@ -70,7 +70,7 @@ def action_done(frames: list[Frame], action: str) -> tuple[bool, dict]:
 
 def analyse(jpegs: list[bytes], claimed_id: str | None = None,
             challenge: dict | None = None, pre_frames: list[Frame] | None = None,
-            first_idx: int | None = None) -> dict:
+            first_idx: int | None = None, provider_name: str | None = None) -> dict:
     """pre_frames: frames already analysed while the burst was still being captured
     (streaming upload). jpegs are the remaining frames, numbered from first_idx."""
     pre_frames = pre_frames or []
@@ -103,7 +103,7 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
             return _finish(result, t0, t_dec, t_frames, t_frames, t_frames)
 
         top = sorted(good or face_frames, key=lambda f: f.rank, reverse=True)[:3]
-        provider = get_provider()
+        provider = get_provider(provider_name)
         # A remote provider (Rekognition) is a network call: run it while liveness computes.
         fut = _POOL.submit(_safe_identify, provider, top, claimed_id) if provider.remote else None
         live = lv.run_all(face_frames, top)
@@ -124,7 +124,7 @@ def analyse(jpegs: list[bytes], claimed_id: str | None = None,
     result["liveness"] = {"score": round(fused, 3), "checks": live, "vetoes": vetoes}
     result["identity"] = ident
 
-    ic = identity_thresholds()
+    ic = identity_thresholds(provider_name)
     sim = ident["similarity"] if ident["user_id"] else 0.0
     id_conf = _ramp(sim, ic["borderline"] - 0.1, min(1.0, ic["match"] + 0.08))
     lc = CFG["liveness"]

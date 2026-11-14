@@ -3,34 +3,87 @@ import { captureStreamed, esc, framesForm, getConfig, postForm, renderDebug, sta
 const $ = (id) => document.getElementById(id);
 const video = $("video"), cam = $("cam"), banner = $("banner"), progress = $("progress");
 const decisionEl = $("decision"), startBtn = $("start"), instruction = $("instruction");
-let cfg, busy = false, resetTimer = null, otpSession = null, flowStart = 0;
+let cfg, busy = false, resetTimer = null, otpSession = null;
+
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+};
+
+const STATE = {
+  ALLOW: { cls: "allow", word: "Allow", note: "Access granted" },
+  DENY: { cls: "deny", word: "Deny", note: "Access denied" },
+  REQUEST_VERIFICATION: { cls: "verify", word: "Step-up", note: "Step-up verification required" },
+};
+const VERDICT = { inside: "Within window", grace: "Grace period", outside: "Outside window" };
 
 function setCamState(state) {
   cam.classList.remove("capturing", "allow", "deny", "verify");
   if (state) cam.classList.add(state);
 }
 
-const STATE = {
-  ALLOW: { cls: "allow", word: "Allow", note: "Access granted" },
-  DENY: { cls: "deny", word: "Deny", note: "Access denied" },
-  REQUEST_VERIFICATION: { cls: "verify", word: "Verify", note: "Additional verification required" },
-};
+/* ---------------------------------------------------------------- context: zone + clock */
+function context() {
+  const live = $("liveTime").checked;
+  return { zone: $("zone").value, at: live ? "" : $("at").value };
+}
 
+function initContext() {
+  const zones = cfg.zones || {};
+  $("zone").innerHTML = Object.entries(zones)
+    .map(([id, z]) => `<option value="${esc(id)}">${esc(z.name)}${z.security === "high" ? " · high security" : ""}</option>`).join("");
+  $("zone").value = store.get("hid.zone") in zones ? store.get("hid.zone") : cfg.default_zone;
+  $("zone").addEventListener("change", () => store.set("hid.zone", $("zone").value));
+  const pad = (n) => String(n).padStart(2, "0");
+  const d = new Date();
+  $("at").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const sync = () => { $("at").disabled = $("liveTime").checked; };
+  $("liveTime").addEventListener("change", sync);
+  sync();
+}
+
+/* ---------------------------------------------------------------- central-server status */
+async function refreshStatus() {
+  try {
+    const s = await (await fetch("/api/node/status")).json();
+    const off = s.mode === "offline";
+    const el = $("netStatus");
+    el.className = `net ${off ? "off" : "on"}`;
+    const role = s.role === "edge" ? "Central server" : "Network";
+    el.innerHTML = off
+      ? `<i></i>Offline · fail-safe mode${s.pending ? ` · ${s.pending} queued` : ""}`
+      : `<i></i>Online${s.role === "edge" ? " · central reachable" : ""}${s.last_reconnect_synced && s.mode === "online" ? ` · synced ${s.last_reconnect_synced}` : ""}`;
+    el.title = `${role}: ${s.central || "none configured"} · kiosk ${s.kiosk} · policy: ${s.policy_source}${s.error ? " · " + s.error : ""}`;
+    $("simulate").textContent = s.simulated ? "Restore network" : "Simulate network loss";
+    $("simulate").dataset.on = s.simulated ? "1" : "";
+  } catch {
+    $("netStatus").className = "net off";
+    $("netStatus").innerHTML = "<i></i>Kiosk server unreachable";
+  }
+}
+
+/* ---------------------------------------------------------------- decision rendering */
 function showDecision(res, totalMs) {
   const st = STATE[res.decision] || { cls: "", word: "", note: "" };
   decisionEl.className = `decision ${st.cls}`;
   const t = res.timing_ms || {};
+  const c = res.context;
   const rows = [];
   if (totalMs) rows.push(["Decision time", `${(totalMs / 1000).toFixed(2)} s`]);
   if (res.confidence !== undefined) rows.push(["Confidence", res.confidence.toFixed(2)]);
-  if (res.identity?.name) rows.push(["Identity", esc(res.identity.name)]);
+  if (res.identity?.name) rows.push(["Identity", esc(res.identity.name) + (c?.role ? ` · ${esc(c.role)}` : "")]);
   if (res.identity?.similarity !== undefined && res.identity?.user_id) rows.push(["Face match", res.identity.similarity.toFixed(2)]);
   if (res.liveness?.score !== undefined) rows.push(["Liveness", res.liveness.score.toFixed(2)]);
+  if (c) {
+    rows.push(["Zone", esc(c.zone_name) + (c.security === "high" ? " · high security" : "")]);
+    rows.push(["Schedule", `${VERDICT[c.verdict] || c.verdict} · ${esc(c.time)}`]);
+  }
+  if (res.mode) rows.push(["Mode", res.mode === "offline" ? "Offline fail-safe" : "Online"]);
   const network = Math.max(0, Math.round(totalMs - (res.capture_ms || 0) - (t.processing || 0)));
   decisionEl.innerHTML = `
     <div class="eyebrow">${esc(st.note)}</div>
     <div class="big">${st.word}</div>
-    <p class="why">${esc((res.reasons || []).join(". "))}</p>
+    <p class="why">${(res.reasons || []).map(esc).join("<br>")}</p>
     ${rows.length ? `<dl class="readout">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
     ${totalMs ? `<p class="breakdown">capture ${Math.round(res.capture_ms || 0)} ms · server ${Math.round(t.processing || 0)} ms · network ${network} ms</p>` : ""}`;
   setCamState(st.cls);
@@ -47,7 +100,7 @@ function idle(msg = "Look at the camera and press Start.") {
   otpSession = null;
 }
 
-function scheduleReset(ms = 7000) {
+function scheduleReset(ms = 8000) {
   clearTimeout(resetTimer);
   resetTimer = setTimeout(() => !busy && !otpSession && idle(), ms);
 }
@@ -64,23 +117,23 @@ async function burst(n, durationMs) {
   return out;
 }
 
+/* ---------------------------------------------------------------- flow */
 async function runCheck() {
   if (busy) return;
   busy = true;
   startBtn.disabled = true;
   clearTimeout(resetTimer);
   $("otpCard").classList.add("hidden");
+  otpSession = null;
   try {
-    flowStart = performance.now();
     banner.textContent = "Hold still";
     decisionEl.className = "decision idle";
     decisionEl.innerHTML = `<div class="eyebrow">Decision</div><div class="big">Checking</div><p class="why">Capturing and analysing.</p>`;
     const shot = await burst(cfg.capture.frames, cfg.capture.duration_ms);
-    const captureMs = shot.captureMs;
     banner.textContent = "Analysing";
-    const t0 = performance.now() - captureMs;
+    const t0 = performance.now() - shot.captureMs;
     const res = await postForm("/api/verify", framesForm([shot.lastBlob], {
-      claimed_id: $("claimed").value, capture_ms: captureMs, burst_id: shot.burstId, n_frames: shot.n }));
+      claimed_id: $("claimed").value, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() }));
     const total = performance.now() - t0;
     postForm("/api/timing", framesForm([], { total_ms: total })).catch(() => {});
     showDecision(res, total);
@@ -90,6 +143,7 @@ async function runCheck() {
   } finally {
     busy = false;
     startBtn.disabled = false;
+    refreshStatus();
   }
 }
 
@@ -107,28 +161,31 @@ async function handleNext(res) {
     await new Promise((r) => setTimeout(r, 900)); // time to read the instruction
     banner.textContent = ch.instruction;
     const shot = await burst(ch.frames, ch.duration_ms);
-    const captureMs = shot.captureMs;
     instruction.style.display = "none";
     banner.textContent = "Analysing";
-    const t0 = performance.now() - captureMs;
+    const t0 = performance.now() - shot.captureMs;
     const res2 = await postForm("/api/verify", framesForm([shot.lastBlob], {
-      challenge_id: ch.id, capture_ms: captureMs, burst_id: shot.burstId, n_frames: shot.n }));
+      challenge_id: ch.id, capture_ms: shot.captureMs, burst_id: shot.burstId, n_frames: shot.n, ...context() }));
     showDecision(res2, performance.now() - t0);
     return handleNext(res2);
   }
   if (res.otp_request) {
-    otpSession = res.otp_request.session_id;
-    banner.textContent = "Enter the code sent to your phone";
-    $("otpSent").textContent = `A one-time code was sent to ${res.otp_request.sent_to}.`;
+    const o = res.otp_request;
+    otpSession = o.session_id;
+    const app = o.methods.includes("authenticator"), sms = o.methods.includes("sms");
+    banner.textContent = "Second factor required";
+    $("otpSent").textContent = app && sms ? `Enter the code from your authenticator app, or the code sent to ${o.sent_to}.`
+      : app ? "Enter the 6-digit code from your authenticator app. It works without a network connection."
+      : `Enter the code sent to ${o.sent_to}.`;
     $("otpCard").classList.remove("hidden");
-    $("phoneCard").classList.remove("hidden");
+    $("phoneCard").classList.toggle("hidden", !sms);
     $("otpCode").value = "";
     $("otpCode").focus();
-    refreshPhone();
+    if (sms) refreshPhone();
     return;
   }
   banner.textContent = (res.reasons || [])[0] || "Please try again";
-  scheduleReset(5000);
+  scheduleReset(6000);
 }
 
 $("otpForm").addEventListener("submit", async (e) => {
@@ -136,7 +193,7 @@ $("otpForm").addEventListener("submit", async (e) => {
   if (!otpSession) return;
   const res = await postForm("/api/otp/verify", framesForm([], { session_id: otpSession, code: $("otpCode").value }));
   if (res.retry) {
-    $("otpSent").textContent = "Wrong code - try again.";
+    $("otpSent").textContent = "Wrong code. Try again.";
     $("otpCode").value = "";
     return;
   }
@@ -144,6 +201,7 @@ $("otpForm").addEventListener("submit", async (e) => {
   $("otpCard").classList.add("hidden");
   showDecision({ ...res, timing_ms: {}, quality: {} });
   banner.textContent = res.decision === "ALLOW" ? "Access granted" : "Access denied";
+  refreshStatus();
   scheduleReset();
 });
 
@@ -156,11 +214,14 @@ async function refreshPhone() {
 
 async function loadUsers() {
   const users = await (await fetch("/api/users")).json();
-  const sel = $("claimed");
-  sel.innerHTML = '<option value="">None, search by face</option>' +
+  $("claimed").innerHTML = '<option value="">None, search by face</option>' +
     users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("");
 }
 
+$("simulate").addEventListener("click", async () => {
+  await postForm("/api/node/simulate_offline", framesForm([], { on: $("simulate").dataset.on ? "false" : "true" }));
+  refreshStatus();
+});
 $("toggleDebug").addEventListener("click", () => {
   const hidden = $("debugCard").classList.toggle("hidden");
   $("toggleDebug").textContent = hidden ? "Signals" : "Hide signals";
@@ -168,7 +229,7 @@ $("toggleDebug").addEventListener("click", () => {
 });
 startBtn.addEventListener("click", runCheck);
 document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && document.activeElement?.tagName !== "INPUT") {
+  if (e.code === "Space" && !["INPUT", "SELECT"].includes(document.activeElement?.tagName)) {
     e.preventDefault();
     runCheck();
   }
@@ -176,7 +237,10 @@ document.addEventListener("keydown", (e) => {
 
 (async () => {
   cfg = await getConfig();
+  initContext();
   await loadUsers();
+  refreshStatus();
+  setInterval(refreshStatus, 3000);
   try {
     await startCamera(video, cfg.capture.width);
     idle();

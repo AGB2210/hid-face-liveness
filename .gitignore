@@ -21,3 +21,4 @@ data/
 # Secrets
 aws-credentials.bat
 .env
+edge.bat
